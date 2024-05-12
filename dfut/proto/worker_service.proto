@@ -1,0 +1,24 @@
+syntax = "proto3";
+package worker_service;
+
+import "d_store_service.proto";
+
+message DoWorkRequest {
+	fixed64 task_id = 1;
+	string fn_name = 2;
+	bytes args = 3;
+}
+
+message DoWorkResponse {
+	string address = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 task_id = 3;
+	fixed64 object_id = 4;
+}
+
+service WorkerService {
+	rpc DoWork(DoWorkRequest) returns (DoWorkResponse);
+	// TODO: Rpc for cli. 
+	// rpc Status(StatusRequest) returns (StatusResponse);
+	// rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
