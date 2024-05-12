@@ -27,14 +27,14 @@ struct LifetimeLease {
 
 #[derive(Debug, Default)]
 pub struct GlobalScheduler {
-    fn_pools: Mutex<HashMap<String, Vec<String>>>,
+    fn_availability: Mutex<HashMap<String, Vec<String>>>,
     lifetimes: Mutex<HashMap<String, LifetimeLease>>,
     lifetime_timeout: Duration,
 }
 
 impl GlobalScheduler {
     fn schedule_fn(&self, fn_name: &str) -> Option<String> {
-        self.fn_pools
+        self.fn_availability
             .lock()
             .unwrap()
             .get(fn_name)?
@@ -71,7 +71,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<RegisterResponse>, Status> {
         let RegisterRequest { address, fn_names } = request.into_inner();
 
-        let mut p = self.fn_pools.lock().unwrap();
+        let mut p = self.fn_availability.lock().unwrap();
         for fn_name in fn_names {
             let p = p.entry(fn_name.clone()).or_default();
             p.push(address.clone());
@@ -187,7 +187,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<UnRegisterResponse>, Status> {
         let UnRegisterRequest { address } = request.into_inner();
 
-        let mut p = self.fn_pools.lock().unwrap();
+        let mut p = self.fn_availability.lock().unwrap();
         for v in p.values_mut() {
             if let Some(i) = v.iter().position(|s| s == &address) {
                 v.remove(i);
