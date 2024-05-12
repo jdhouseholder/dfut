@@ -26,13 +26,18 @@ use crate::{
     Error,
 };
 
+#[derive(Debug)]
+struct SharedRuntimeState {
+    d_scheduler: DScheduler,
+    d_store: Arc<DStore>,
+    lifetimes: Mutex<HashMap<String, u64>>,
+    lifetime_id: Arc<AtomicU64>,
+    next_task_id: AtomicU64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RootRuntime {
-    d_scheduler: Arc<DScheduler>,
-    d_store: Arc<DStore>,
-    lifetimes: Arc<Mutex<HashMap<String, u64>>>,
-    lifetime_id: Arc<AtomicU64>,
-    next_task_id: Arc<AtomicU64>,
+    shared_runtime_state: Arc<SharedRuntimeState>,
 
     local_server_address: String,
     heartbeat_timeout: u64,
@@ -44,7 +49,7 @@ impl RootRuntime {
         global_scheduler_address: &str,
         fn_names: Vec<String>,
     ) -> Self {
-        let d_scheduler = Arc::new(DScheduler::new(&global_scheduler_address).await);
+        let d_scheduler = DScheduler::new(&global_scheduler_address).await;
 
         let RegisterResponse {
             lifetime_id,
@@ -55,16 +60,18 @@ impl RootRuntime {
             .unwrap();
 
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
-        let next_task_id = Arc::new(AtomicU64::new(0));
+        let next_task_id = AtomicU64::new(0);
 
         let d_store = Arc::new(DStore::new(local_server_address, &lifetime_id).await);
 
         Self {
-            d_scheduler,
-            d_store,
-            lifetimes: Arc::default(),
-            lifetime_id,
-            next_task_id,
+            shared_runtime_state: Arc::new(SharedRuntimeState {
+                d_scheduler,
+                d_store,
+                lifetimes: Mutex::default(),
+                lifetime_id,
+                next_task_id,
+            }),
 
             local_server_address: local_server_address.to_string(),
             heartbeat_timeout,
@@ -73,16 +80,14 @@ impl RootRuntime {
 
     pub fn new_child(&self, remote_parent_task_id: u64) -> Runtime {
         Runtime {
-            d_scheduler: Arc::clone(&self.d_scheduler),
-            d_store: Arc::clone(&self.d_store),
-            current_lifetime_id: Arc::clone(&self.lifetime_id),
-            lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
-            next_task_id: Arc::clone(&self.next_task_id),
+            shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
-            lifetimes: Arc::clone(&self.lifetimes),
-
+            lifetime_id: self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst),
             _parent_task_id: remote_parent_task_id,
-            task_id: self.next_task_id.fetch_add(1, Ordering::SeqCst),
+            task_id: self
+                .shared_runtime_state
+                .next_task_id
+                .fetch_add(1, Ordering::SeqCst),
             _inner: Arc::default(),
         }
     }
@@ -91,20 +96,21 @@ impl RootRuntime {
         // TODO: shutdown via select.
         let sleep_for = std::time::Duration::from_secs(self.heartbeat_timeout / 3);
         loop {
-            let local_lifetime_id = self.lifetime_id.load(Ordering::SeqCst);
+            let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
             // TODO: retry & graceful fail.
             let HeartBeatResponse {
                 lifetime_id,
                 lifetimes,
             } = self
+                .shared_runtime_state
                 .d_scheduler
                 .heart_beat(&self.local_server_address, local_lifetime_id)
                 .await
                 .unwrap();
 
             // TODO: can pass a lifetimes version id to avoid sending lifetimes every time.
-            *self.lifetimes.lock().unwrap() = lifetimes
+            *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes
                 .into_iter()
                 .map(|l| (l.address, l.lifetime_id))
                 .collect();
@@ -121,10 +127,12 @@ impl RootRuntime {
                 // To simplify this logic we will simply clear the d_store and fail all d_futs that
                 // this worker will resolve if they have a lifetime_id that is older than the new
                 // one.
-                self.lifetime_id.store(lifetime_id, Ordering::SeqCst);
+                self.shared_runtime_state
+                    .lifetime_id
+                    .store(lifetime_id, Ordering::SeqCst);
                 // We can simply clear the d_store after incrementing the lifetime_id since we
                 // don't reset the object_id.
-                self.d_store.clear();
+                self.shared_runtime_state.d_store.clear();
             }
 
             tokio::time::sleep(sleep_for).await;
@@ -142,7 +150,7 @@ impl RootRuntime {
             .parse()
             .unwrap();
 
-        let d_store = Arc::clone(&self.d_store);
+        let d_store = Arc::clone(&self.shared_runtime_state.d_store);
 
         tokio::spawn(async move {
             self.heart_beat_forever().await;
@@ -188,15 +196,9 @@ struct InnerRuntime {
 
 #[derive(Debug, Clone)]
 pub struct Runtime {
-    d_scheduler: Arc<DScheduler>,
-    d_store: Arc<DStore>,
-    current_lifetime_id: Arc<AtomicU64>,
+    shared_runtime_state: Arc<SharedRuntimeState>,
+
     lifetime_id: u64,
-    next_task_id: Arc<AtomicU64>,
-
-    // Lifetimes is updated during heartbeats with the global scheduler.
-    lifetimes: Arc<Mutex<HashMap<String, u64>>>,
-
     _parent_task_id: u64,
     task_id: u64,
     _inner: Arc<Mutex<InnerRuntime>>,
@@ -204,7 +206,8 @@ pub struct Runtime {
 
 impl Runtime {
     fn is_valid_id(&self, d_store_id: &DStoreId) -> Option<bool> {
-        self.lifetimes
+        self.shared_runtime_state
+            .lifetimes
             .lock()
             .unwrap()
             .get(&d_store_id.address)
@@ -224,7 +227,11 @@ impl Runtime {
                     }
                 }
 
-                let t = self.d_store.get_or_watch(id.clone()).await;
+                let t = self
+                    .shared_runtime_state
+                    .d_store
+                    .get_or_watch(id.clone())
+                    .await;
                 // TODO: n lineage retries on failed wait?
                 t
             }
@@ -242,7 +249,10 @@ impl Runtime {
                     }
                 }
 
-                self.d_store.decrement_or_remove(id.clone(), 1).await?;
+                self.shared_runtime_state
+                    .d_store
+                    .decrement_or_remove(id.clone(), 1)
+                    .await?;
                 Ok(())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -258,7 +268,7 @@ impl Runtime {
                     }
                 }
 
-                self.d_store.share(&id, 1).await?;
+                self.shared_runtime_state.d_store.share(&id, 1).await?;
                 Ok(id.clone().into())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -274,7 +284,7 @@ impl Runtime {
                     }
                 }
 
-                self.d_store.share(&id, n).await?;
+                self.shared_runtime_state.d_store.share(&id, n).await?;
                 Ok((0..n).map(|_| id.clone().into()).collect())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -286,7 +296,9 @@ impl Runtime {
         T: Serialize + Send + 'static,
     {
         let d_store_id = self.next_d_store_id();
-        self.d_store.publish(d_store_id.clone(), t)?;
+        self.shared_runtime_state
+            .d_store
+            .publish(d_store_id.clone(), t)?;
         Ok(d_store_id.into())
     }
 }
@@ -294,22 +306,22 @@ impl Runtime {
 impl Runtime {
     pub fn new_child(&self) -> Runtime {
         Runtime {
-            d_scheduler: Arc::clone(&self.d_scheduler),
-            d_store: Arc::clone(&self.d_store),
-            current_lifetime_id: Arc::clone(&self.current_lifetime_id),
+            shared_runtime_state: Arc::clone(&self.shared_runtime_state),
+
             lifetime_id: self.lifetime_id,
-            next_task_id: Arc::clone(&self.next_task_id),
-
-            lifetimes: Arc::clone(&self.lifetimes),
-
             _parent_task_id: self.task_id,
-            task_id: self.next_task_id.fetch_add(1, Ordering::SeqCst),
+            task_id: self
+                .shared_runtime_state
+                .next_task_id
+                .fetch_add(1, Ordering::SeqCst),
             _inner: Arc::default(),
         }
     }
 
     pub fn accept_local_work(&self, fn_name: &str) -> bool {
-        self.d_scheduler.accept_local_work(fn_name)
+        self.shared_runtime_state
+            .d_scheduler
+            .accept_local_work(fn_name)
     }
 
     // Can we use https://docs.rs/tokio-metrics/0.3.1/tokio_metrics/ to make decisions?
@@ -333,12 +345,17 @@ impl Runtime {
             let d_store_id = d_store_id.clone();
             let fn_name = fn_name.to_string();
             async move {
-                let token = rt.d_scheduler.start_local_work();
+                let token = rt.shared_runtime_state.d_scheduler.start_local_work();
 
                 let t = fut.await;
-                rt.d_store.publish(d_store_id, &t).unwrap();
+                rt.shared_runtime_state
+                    .d_store
+                    .publish(d_store_id, &t)
+                    .unwrap();
 
-                rt.d_scheduler.finish_local_work(token, &fn_name);
+                rt.shared_runtime_state
+                    .d_scheduler
+                    .finish_local_work(token, &fn_name);
             }
         });
 
@@ -370,7 +387,7 @@ impl Runtime {
     }
 
     fn next_d_store_id(&self) -> DStoreId {
-        self.d_store.take_next_id(self.task_id)
+        self.shared_runtime_state.d_store.take_next_id(self.task_id)
     }
 
     // TODO: just generate this for each fn, that way we don't have to use Work
@@ -383,7 +400,11 @@ impl Runtime {
     {
         let work = iw.into_work();
 
-        let d_store_id = self.d_scheduler.schedule(self.task_id, work.clone()).await;
+        let d_store_id = self
+            .shared_runtime_state
+            .d_scheduler
+            .schedule(self.task_id, work.clone())
+            .await;
 
         self.track_call(Call::Remote {
             work,
