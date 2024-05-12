@@ -29,9 +29,8 @@ pub use work::{IntoWork, Work};
 
 pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+pub use rmp_serde;
 pub use serde;
-// TODO: swap to message pack or something else.
-pub use serde_json;
 pub use tonic;
 
 extern crate dfut_macro;

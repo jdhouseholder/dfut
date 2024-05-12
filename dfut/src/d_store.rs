@@ -228,7 +228,7 @@ impl DStore {
     where
         T: Serialize + Send + 'static,
     {
-        let b = serde_json::to_vec(t).unwrap();
+        let b = rmp_serde::to_vec(t).unwrap();
         self.local_store.insert(key, b);
         Ok(())
     }
@@ -243,7 +243,7 @@ impl DStore {
         } {
             // MUST decrement remote. We can omit the object transfer.
             self.d_store_client.decrement_or_remove(key, 1).await?;
-            return Ok(serde_json::from_slice(&b).unwrap());
+            return Ok(rmp_serde::from_slice(&b).unwrap());
         }
 
         if key.address != self.current_address {
@@ -254,7 +254,7 @@ impl DStore {
                 .get_or_watch(key.clone())
                 .await
                 .ok_or(Error::System)?;
-            Ok(serde_json::from_slice(&b).unwrap())
+            Ok(rmp_serde::from_slice(&b).unwrap())
         }
     }
 
@@ -328,7 +328,7 @@ impl DStoreClient {
         // TODO: We can avoid this if we know if the object has been deallocated.
         self.lru.lock().unwrap().put(key, object.clone());
 
-        return Ok(serde_json::from_slice(&object).unwrap());
+        return Ok(rmp_serde::from_slice(&object).unwrap());
     }
 
     pub(crate) async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
