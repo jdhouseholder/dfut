@@ -45,7 +45,7 @@ impl Into<DoWorkResponse> for DStoreId {
 #[derive(Debug)]
 enum Entry {
     Watch {
-        tx: broadcast::Sender<Vec<u8>>,
+        tx: broadcast::Sender<Option<Vec<u8>>>,
         subscribers: u64,
         ref_count: u64,
     },
@@ -76,11 +76,11 @@ impl LocalStore {
             // subscribers must be less than or equal to ref_count.
             if subscribers == ref_count {
                 // All refs are currently subscribed. We can't have any new gets or shares.
-                tx.send(b).unwrap();
+                tx.send(Some(b)).unwrap();
                 return;
             } else {
                 // There are still outstanding refs, we need to store.
-                tx.send(b.clone()).unwrap();
+                tx.send(Some(b.clone())).unwrap();
                 new_ref_count = ref_count - subscribers;
             }
         }
@@ -93,7 +93,7 @@ impl LocalStore {
         );
     }
 
-    async fn get_or_watch(&self, key: DStoreId) -> Vec<u8> {
+    async fn get_or_watch(&self, key: DStoreId) -> Option<Vec<u8>> {
         let mut rx = {
             let mut m = self.blob_store.lock().unwrap();
             let rx = match m.entry(key) {
@@ -117,13 +117,13 @@ impl LocalStore {
                             if *ref_count == 0 {
                                 remove = true;
                             } else {
-                                return b.clone();
+                                return Some(b.clone());
                             }
                         }
                     }
                     if remove {
                         match o.remove() {
-                            Entry::DBlob { b, .. } => return b,
+                            Entry::DBlob { b, .. } => return Some(b),
                             _ => panic!(),
                         }
                     }
@@ -177,6 +177,19 @@ impl LocalStore {
         }
 
         remove
+    }
+
+    fn clear(&self) {
+        let mut m = self.blob_store.lock().unwrap();
+        for e in m.values() {
+            match e {
+                Entry::Watch { tx, .. } => {
+                    tx.send(None).unwrap();
+                }
+                Entry::DBlob { .. } => {}
+            }
+        }
+        m.clear();
     }
 }
 
@@ -236,7 +249,11 @@ impl DStore {
         if key.address != self.current_address {
             self.d_store_client.get_or_watch(key).await
         } else {
-            let b = self.local_store.get_or_watch(key.clone()).await;
+            let b = self
+                .local_store
+                .get_or_watch(key.clone())
+                .await
+                .ok_or(Error::System)?;
             Ok(serde_json::from_slice(&b).unwrap())
         }
     }
@@ -261,7 +278,9 @@ impl DStore {
         Ok(())
     }
 
-    pub(crate) fn clear(&self) {}
+    pub(crate) fn clear(&self) {
+        self.local_store.clear()
+    }
 }
 
 #[derive(Debug)]
@@ -369,7 +388,11 @@ impl DStoreService for Arc<DStore> {
             object_id,
         };
 
-        let b = self.local_store.get_or_watch(id.clone()).await;
+        let b = self
+            .local_store
+            .get_or_watch(id.clone())
+            .await
+            .ok_or_else(|| Status::not_found("DFut canceled."))?;
 
         Ok(Response::new(GetOrWatchResponse { object: b }))
     }

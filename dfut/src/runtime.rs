@@ -122,6 +122,8 @@ impl RootRuntime {
                 // this worker will resolve if they have a lifetime_id that is older than the new
                 // one.
                 self.lifetime_id.store(lifetime_id, Ordering::SeqCst);
+                // We can simply clear the d_store after incrementing the lifetime_id since we
+                // don't reset the object_id.
                 self.d_store.clear();
             }
 
