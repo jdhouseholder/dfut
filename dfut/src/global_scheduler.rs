@@ -2,6 +2,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use log::error;
 use rand::seq::SliceRandom;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -130,13 +131,13 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
                 if expired_lifetime_id || lifetime_id_timeout {
                     if expired_lifetime_id {
-                        eprintln!(
+                        error!(
                             "expired_lifetime_id: got={}, want={}",
                             lifetime_id, lifetime_lease.id
                         );
                     }
                     if lifetime_id_timeout {
-                        eprintln!(
+                        error!(
                             "lifetime_id_timeout: dur_since_last_heart_beat={:?}",
                             dur_since_last_heart_beat
                         );
