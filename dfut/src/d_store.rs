@@ -183,18 +183,18 @@ impl LocalStore {
 #[derive(Debug, Default)]
 pub(crate) struct DStore {
     current_address: String,
-    lifetime_id: u64,
+    lifetime_id: Arc<AtomicU64>,
     next_object_id: AtomicU64,
 
-    local_store: Arc<LocalStore>,
+    local_store: LocalStore,
     d_store_client: DStoreClient,
 }
 
 impl DStore {
-    pub(crate) async fn new(current_address: &str, lifetime_id: u64) -> Self {
+    pub(crate) async fn new(current_address: &str, lifetime_id: &Arc<AtomicU64>) -> Self {
         Self {
             current_address: current_address.to_string(),
-            lifetime_id,
+            lifetime_id: Arc::clone(&lifetime_id),
             next_object_id: AtomicU64::new(0),
 
             local_store: Default::default(),
@@ -205,7 +205,7 @@ impl DStore {
     pub(crate) fn take_next_id(&self, task_id: u64) -> DStoreId {
         DStoreId {
             address: self.current_address.clone(),
-            lifetime_id: self.lifetime_id,
+            lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
             task_id,
             object_id: self.next_object_id.fetch_add(1, Ordering::SeqCst),
         }
@@ -358,7 +358,7 @@ impl DStoreService for Arc<DStore> {
             object_id,
         } = request.into_inner();
 
-        if lifetime_id < self.lifetime_id {
+        if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
             return Err(Status::not_found("Lifetime too old".to_string()));
         }
 
@@ -386,7 +386,7 @@ impl DStoreService for Arc<DStore> {
             n,
         } = request.into_inner();
 
-        if lifetime_id < self.lifetime_id {
+        if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
             return Err(Status::not_found("Lifetime too old".to_string()));
         }
 
@@ -414,7 +414,7 @@ impl DStoreService for Arc<DStore> {
             by,
         } = request.into_inner();
 
-        if lifetime_id < self.lifetime_id {
+        if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
             return Err(Status::not_found("Lifetime too old".to_string()));
         }
 

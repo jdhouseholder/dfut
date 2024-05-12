@@ -54,10 +54,10 @@ impl RootRuntime {
             .await
             .unwrap();
 
-        let d_store = Arc::new(DStore::new(local_server_address, lifetime_id).await);
-
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
         let next_task_id = Arc::new(AtomicU64::new(0));
+
+        let d_store = Arc::new(DStore::new(local_server_address, &lifetime_id).await);
 
         Self {
             d_scheduler,
