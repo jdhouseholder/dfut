@@ -36,7 +36,7 @@ message ScheduleResponse {
 }
 
 message UnRegisterRequest {
-	fixed64 lifetime_id = 1;
+	string address = 1;
 }
 
 message UnRegisterResponse {

@@ -185,9 +185,15 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         &self,
         request: Request<UnRegisterRequest>,
     ) -> Result<Response<UnRegisterResponse>, Status> {
-        let _ = request;
+        let UnRegisterRequest { address } = request.into_inner();
 
-        // Remove address from pool
+        let mut p = self.fn_pools.lock().unwrap();
+        for v in p.values_mut() {
+            if let Some(i) = v.iter().position(|s| s == &address) {
+                v.remove(i);
+                continue;
+            }
+        }
 
         Ok(Response::new(UnRegisterResponse::default()))
     }
