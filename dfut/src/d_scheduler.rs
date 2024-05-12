@@ -1,9 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::{
@@ -44,14 +42,14 @@ pub(crate) struct LocalWorkToken {
 #[derive(Debug)]
 pub(crate) struct DScheduler {
     d_scheduler_client: DSchedulerClient,
-    stats: StdMutex<Stats>,
+    stats: Mutex<Stats>,
 }
 
 impl DScheduler {
     pub(crate) async fn new(address: &str) -> Self {
         Self {
             d_scheduler_client: DSchedulerClient::new(address).await,
-            stats: StdMutex::default(),
+            stats: Mutex::default(),
         }
     }
 
@@ -60,7 +58,7 @@ impl DScheduler {
         address: &str,
         fn_names: Vec<String>,
     ) -> Result<RegisterResponse, Box<dyn std::error::Error>> {
-        let mut global_scheduler = self.d_scheduler_client.global_scheduler.lock().await;
+        let mut global_scheduler = self.d_scheduler_client.global_scheduler.clone();
         Ok(global_scheduler
             .register(RegisterRequest {
                 address: address.to_string(),
@@ -75,7 +73,7 @@ impl DScheduler {
         address: &str,
         lifetime_id: u64,
     ) -> Result<HeartBeatResponse, Box<dyn std::error::Error>> {
-        let mut global_scheduler = self.d_scheduler_client.global_scheduler.lock().await;
+        let mut global_scheduler = self.d_scheduler_client.global_scheduler.clone();
         Ok(global_scheduler
             .heart_beat(HeartBeatRequest {
                 address: address.to_string(),
@@ -117,7 +115,7 @@ impl DScheduler {
 // TODO: Do real retries.
 #[derive(Debug, Clone)]
 pub(crate) struct DSchedulerClient {
-    global_scheduler: Arc<Mutex<GlobalSchedulerServiceClient<Channel>>>,
+    global_scheduler: GlobalSchedulerServiceClient<Channel>,
 }
 
 impl DSchedulerClient {
@@ -134,14 +132,12 @@ impl DSchedulerClient {
     pub(crate) async fn new(global_scheduler_address: &str) -> Self {
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let global_scheduler = Self::gs_connect(endpoint).await;
-        Self {
-            global_scheduler: Arc::new(Mutex::new(global_scheduler)),
-        }
+        Self { global_scheduler }
     }
 
     async fn schedule_with_retry(&self, w: &Work) -> String {
         for i in 0..5 {
-            let mut global_scheduler = self.global_scheduler.lock().await;
+            let mut global_scheduler = self.global_scheduler.clone();
             let req: ScheduleRequest = w.into();
             let ScheduleResponse { address } =
                 global_scheduler.schedule(req).await.unwrap().into_inner();
