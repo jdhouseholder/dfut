@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rand::seq::SliceRandom;
 use tonic::{transport::Server, Request, Response, Status};
@@ -11,14 +12,22 @@ pub(crate) mod global_scheduler_service {
 
 use global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    HeartBeatRequest, HeartBeatResponse, RegisterRequest, RegisterResponse, ScheduleRequest,
-    ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
+    HeartBeatRequest, HeartBeatResponse, Lifetime, RegisterRequest, RegisterResponse,
+    ScheduleRequest, ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
 };
+
+#[derive(Debug)]
+struct LifetimeLease {
+    id: u64,
+    at: Instant,
+}
 
 #[derive(Debug, Default)]
 pub struct GlobalScheduler {
     ids: Mutex<HashMap<String, AtomicU64>>,
     fn_pools: Mutex<HashMap<String, Vec<String>>>,
+    lifetimes: Mutex<HashMap<String, LifetimeLease>>,
+    lifetime_timeout: Duration,
 }
 
 impl GlobalScheduler {
@@ -33,7 +42,10 @@ impl GlobalScheduler {
     }
 
     pub async fn serve(address: &str) {
-        let global_scheduler = Arc::new(Self::default());
+        let global_scheduler = Arc::new(Self {
+            lifetime_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
         let address = address
             .strip_prefix("http://")
             .unwrap()
@@ -81,16 +93,50 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         request: Request<HeartBeatRequest>,
     ) -> Result<Response<HeartBeatResponse>, Status> {
         let HeartBeatRequest {
-            address: _,
+            address,
             lifetime_id,
         } = request.into_inner();
 
-        // Restart (address, lifetime_id) lease.
+        let mut lifetimes = self.lifetimes.lock().unwrap();
+
+        let lifetime_id = match lifetimes.entry(address.clone()) {
+            Entry::Occupied(ref mut o) => {
+                let now = Instant::now();
+
+                let lifetime_lease = o.get_mut();
+
+                if lifetime_id > lifetime_lease.id {
+                    todo!("Error: Workers cannot have a higher lifetime id than the lease, there is a bug.");
+                }
+                if lifetime_id < lifetime_lease.id
+                    || now.checked_duration_since(lifetime_lease.at).unwrap()
+                        > self.lifetime_timeout
+                {
+                    lifetime_lease.id += 1;
+                }
+
+                lifetime_lease.at = now;
+                lifetime_lease.id
+            }
+            Entry::Vacant(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "{} does not have a lifetime lease.",
+                    address
+                )));
+            }
+        };
+
+        let lifetimes = lifetimes
+            .iter()
+            .map(|(address, lifetime_lease)| Lifetime {
+                address: address.to_string(),
+                lifetime_id: lifetime_lease.id,
+            })
+            .collect();
 
         Ok(Response::new(HeartBeatResponse {
             lifetime_id,
-            // Just send all now, deltas later.
-            lifetimes: vec![],
+            lifetimes,
         }))
     }
 
