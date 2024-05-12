@@ -1,5 +1,5 @@
 # A Distributed Future System in Rust
-This is a prototype system for distributed futures in rust.
+⚠️ This is a *prototype* system for distributed futures in rust.
 
 ## Local demo
 Example usage can be found at https://github.com/jdhouseholder/dfut-example/blob/main/src/main.rs
