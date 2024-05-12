@@ -153,19 +153,19 @@ impl LocalStore {
         Ok(())
     }
 
-    async fn decrement_or_remove(&self, key: &DStoreId, _by: u64) -> bool {
+    async fn decrement_or_remove(&self, key: &DStoreId, by: u64) -> bool {
         let mut m = self.blob_store.lock().unwrap();
         let mut remove = false;
 
         match m.get_mut(&key).unwrap() {
             Entry::Watch { ref_count, .. } => {
-                *ref_count -= 1;
+                *ref_count -= by;
                 if *ref_count == 0 {
                     remove = true;
                 }
             }
             Entry::DBlob { ref_count, .. } => {
-                *ref_count -= 1;
+                *ref_count -= by;
                 if *ref_count == 0 {
                     remove = true;
                 }
@@ -455,5 +455,54 @@ impl DStoreService for Arc<DStore> {
             .await;
 
         Ok(Response::new(DecrementOrRemoveResponse { removed }))
+    }
+}
+
+#[cfg(test)]
+mod local_store_test {
+    use super::*;
+
+    #[tokio::test]
+    async fn insert_then_get() {
+        let local_store = LocalStore::default();
+        let key = DStoreId {
+            address: "address".to_string(),
+            lifetime_id: 0,
+            task_id: 0,
+            object_id: 0,
+        };
+        let want = vec![1];
+
+        local_store.insert(key.clone(), want.clone());
+        let got = local_store.get_or_watch(key).await.unwrap();
+
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn insert_then_watch() {
+        let local_store = Arc::new(LocalStore::default());
+        let key = DStoreId {
+            address: "address".to_string(),
+            lifetime_id: 0,
+            task_id: 0,
+            object_id: 0,
+        };
+        let want = vec![1];
+
+        let jh = tokio::spawn({
+            let local_store = Arc::clone(&local_store);
+            let key = key.clone();
+            let want = want.clone();
+            async move {
+                let got = local_store.get_or_watch(key).await.unwrap();
+                assert_eq!(got, want);
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        local_store.insert(key.clone(), want.clone());
+
+        let _ = jh.await.unwrap();
     }
 }
