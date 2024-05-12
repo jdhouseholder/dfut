@@ -75,7 +75,8 @@ impl RootRuntime {
         Runtime {
             d_scheduler: Arc::clone(&self.d_scheduler),
             d_store: Arc::clone(&self.d_store),
-            lifetime_id: Arc::clone(&self.lifetime_id),
+            current_lifetime_id: Arc::clone(&self.lifetime_id),
+            lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
             next_task_id: Arc::clone(&self.next_task_id),
 
             lifetimes: Arc::clone(&self.lifetimes),
@@ -88,6 +89,7 @@ impl RootRuntime {
 
     async fn heart_beat_forever(&self) {
         // TODO: shutdown via select.
+        let sleep_for = std::time::Duration::from_secs(self.heartbeat_timeout / 3);
         loop {
             let local_lifetime_id = self.lifetime_id.load(Ordering::SeqCst);
 
@@ -108,11 +110,22 @@ impl RootRuntime {
                 .collect();
 
             if lifetime_id != local_lifetime_id {
-                // TODO: clear the d_store because we now have a new lifetime id.
+                // If we hit this case it means we didn't renew our lifetime lease, so either the
+                // global scheduler died or there has been a network partition. So we can actually
+                // continue to compute the current values and put them into a temporary store.
+                // This way we can serve old dfuts if they haven't been d_awaited, but also care to
+                // not block up the d_store with d_futs that won't be resolved.
+                //
+                // New tasks will now be associated with this lifetime.
+                //
+                // To simplify this logic we will simply clear the d_store and fail all d_futs that
+                // this worker will resolve if they have a lifetime_id that is older than the new
+                // one.
                 self.lifetime_id.store(lifetime_id, Ordering::SeqCst);
+                self.d_store.clear();
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(self.heartbeat_timeout)).await;
+            tokio::time::sleep(sleep_for).await;
         }
     }
 
@@ -175,7 +188,8 @@ struct InnerRuntime {
 pub struct Runtime {
     d_scheduler: Arc<DScheduler>,
     d_store: Arc<DStore>,
-    lifetime_id: Arc<AtomicU64>,
+    current_lifetime_id: Arc<AtomicU64>,
+    lifetime_id: u64,
     next_task_id: Arc<AtomicU64>,
 
     // Lifetimes is updated during heartbeats with the global scheduler.
@@ -280,7 +294,8 @@ impl Runtime {
         Runtime {
             d_scheduler: Arc::clone(&self.d_scheduler),
             d_store: Arc::clone(&self.d_store),
-            lifetime_id: Arc::clone(&self.lifetime_id),
+            current_lifetime_id: Arc::clone(&self.current_lifetime_id),
+            lifetime_id: self.lifetime_id,
             next_task_id: Arc::clone(&self.next_task_id),
 
             lifetimes: Arc::clone(&self.lifetimes),

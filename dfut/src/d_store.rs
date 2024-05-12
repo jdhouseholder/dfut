@@ -260,6 +260,8 @@ impl DStore {
 
         Ok(())
     }
+
+    pub(crate) fn clear(&self) {}
 }
 
 #[derive(Debug)]
