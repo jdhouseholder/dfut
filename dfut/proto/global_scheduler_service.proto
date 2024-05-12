@@ -8,6 +8,7 @@ message RegisterRequest {
 
 message RegisterResponse {
 	fixed64 lifetime_id = 1;
+	fixed64 heartbeat_timeout = 2;
 }
 
 message HeartBeatRequest {

@@ -9,8 +9,8 @@ use tonic::transport::{Channel, Endpoint};
 use crate::{
     d_store::DStoreId,
     global_scheduler::global_scheduler_service::{
-        global_scheduler_service_client::GlobalSchedulerServiceClient, RegisterRequest,
-        RegisterResponse, ScheduleRequest, ScheduleResponse,
+        global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
+        HeartBeatResponse, RegisterRequest, RegisterResponse, ScheduleRequest, ScheduleResponse,
     },
     work::Work,
 };
@@ -59,16 +59,30 @@ impl DScheduler {
         &self,
         address: &str,
         fn_names: Vec<String>,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> Result<RegisterResponse, Box<dyn std::error::Error>> {
         let mut global_scheduler = self.d_scheduler_client.global_scheduler.lock().await;
-        let RegisterResponse { lifetime_id } = global_scheduler
+        Ok(global_scheduler
             .register(RegisterRequest {
                 address: address.to_string(),
                 fn_names,
             })
             .await?
-            .into_inner();
-        Ok(lifetime_id)
+            .into_inner())
+    }
+
+    pub(crate) async fn heart_beat(
+        &self,
+        address: &str,
+        lifetime_id: u64,
+    ) -> Result<HeartBeatResponse, Box<dyn std::error::Error>> {
+        let mut global_scheduler = self.d_scheduler_client.global_scheduler.lock().await;
+        Ok(global_scheduler
+            .heart_beat(HeartBeatRequest {
+                address: address.to_string(),
+                lifetime_id,
+            })
+            .await?
+            .into_inner())
     }
 
     pub(crate) fn accept_local_work(&self, _fn_name: &str) -> bool {

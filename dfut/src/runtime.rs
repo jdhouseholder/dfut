@@ -21,6 +21,7 @@ use crate::{
         d_store_service::d_store_service_server::DStoreServiceServer, DStore, DStoreClient,
         DStoreId,
     },
+    global_scheduler::global_scheduler_service::{HeartBeatResponse, RegisterResponse},
     work::{IntoWork, Work},
     Error,
 };
@@ -30,7 +31,11 @@ pub struct RootRuntime {
     d_scheduler: Arc<DScheduler>,
     d_store: Arc<DStore>,
     lifetimes: Arc<Mutex<HashMap<String, u64>>>,
+    lifetime_id: Arc<AtomicU64>,
     next_task_id: Arc<AtomicU64>,
+
+    local_server_address: String,
+    heartbeat_timeout: u64,
 }
 
 impl RootRuntime {
@@ -41,20 +46,28 @@ impl RootRuntime {
     ) -> Self {
         let d_scheduler = Arc::new(DScheduler::new(&global_scheduler_address).await);
 
-        let lifetime_id = d_scheduler
+        let RegisterResponse {
+            lifetime_id,
+            heartbeat_timeout,
+        } = d_scheduler
             .register(local_server_address, fn_names)
             .await
             .unwrap();
 
         let d_store = Arc::new(DStore::new(local_server_address, lifetime_id).await);
 
+        let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
         let next_task_id = Arc::new(AtomicU64::new(0));
 
         Self {
             d_scheduler,
             d_store,
             lifetimes: Arc::default(),
+            lifetime_id,
             next_task_id,
+
+            local_server_address: local_server_address.to_string(),
+            heartbeat_timeout,
         }
     }
 
@@ -62,6 +75,7 @@ impl RootRuntime {
         Runtime {
             d_scheduler: Arc::clone(&self.d_scheduler),
             d_store: Arc::clone(&self.d_store),
+            lifetime_id: Arc::clone(&self.lifetime_id),
             next_task_id: Arc::clone(&self.next_task_id),
 
             lifetimes: Arc::clone(&self.lifetimes),
@@ -69,6 +83,36 @@ impl RootRuntime {
             _parent_task_id: remote_parent_task_id,
             task_id: self.next_task_id.fetch_add(1, Ordering::SeqCst),
             _inner: Arc::default(),
+        }
+    }
+
+    async fn heart_beat_forever(&self) {
+        // TODO: shutdown via select.
+        loop {
+            let local_lifetime_id = self.lifetime_id.load(Ordering::SeqCst);
+
+            // TODO: retry & graceful fail.
+            let HeartBeatResponse {
+                lifetime_id,
+                lifetimes,
+            } = self
+                .d_scheduler
+                .heart_beat(&self.local_server_address, local_lifetime_id)
+                .await
+                .unwrap();
+
+            // TODO: can pass a lifetimes version id to avoid sending lifetimes every time.
+            *self.lifetimes.lock().unwrap() = lifetimes
+                .into_iter()
+                .map(|l| (l.address, l.lifetime_id))
+                .collect();
+
+            if lifetime_id != local_lifetime_id {
+                // TODO: clear the d_store because we now have a new lifetime id.
+                self.lifetime_id.store(lifetime_id, Ordering::SeqCst);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(self.heartbeat_timeout)).await;
         }
     }
 
@@ -83,9 +127,15 @@ impl RootRuntime {
             .parse()
             .unwrap();
 
+        let d_store = Arc::clone(&self.d_store);
+
+        tokio::spawn(async move {
+            self.heart_beat_forever().await;
+        });
+
         Server::builder()
             .add_service(
-                DStoreServiceServer::new(Arc::clone(&self.d_store))
+                DStoreServiceServer::new(d_store)
                     .max_encoding_message_size(usize::MAX)
                     .max_decoding_message_size(usize::MAX),
             )
@@ -125,6 +175,7 @@ struct InnerRuntime {
 pub struct Runtime {
     d_scheduler: Arc<DScheduler>,
     d_store: Arc<DStore>,
+    lifetime_id: Arc<AtomicU64>,
     next_task_id: Arc<AtomicU64>,
 
     // Lifetimes is updated during heartbeats with the global scheduler.
@@ -229,6 +280,7 @@ impl Runtime {
         Runtime {
             d_scheduler: Arc::clone(&self.d_scheduler),
             d_store: Arc::clone(&self.d_store),
+            lifetime_id: Arc::clone(&self.lifetime_id),
             next_task_id: Arc::clone(&self.next_task_id),
 
             lifetimes: Arc::clone(&self.lifetimes),

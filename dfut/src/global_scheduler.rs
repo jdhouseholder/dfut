@@ -1,5 +1,4 @@
 use std::collections::{hash_map::Entry, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +15,9 @@ use global_scheduler_service::{
     ScheduleRequest, ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
 };
 
+const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 5; // TODO: pass through config
+const DEFAULT_LIFETIME_ID: u64 = 1;
+
 #[derive(Debug)]
 struct LifetimeLease {
     id: u64,
@@ -24,7 +26,6 @@ struct LifetimeLease {
 
 #[derive(Debug, Default)]
 pub struct GlobalScheduler {
-    ids: Mutex<HashMap<String, AtomicU64>>,
     fn_pools: Mutex<HashMap<String, Vec<String>>>,
     lifetimes: Mutex<HashMap<String, LifetimeLease>>,
     lifetime_timeout: Duration,
@@ -76,16 +77,29 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             p.dedup();
         }
 
-        // store address -> lifetime_id ~forever.
-        let lifetime_id = self
-            .ids
-            .lock()
-            .unwrap()
-            .entry(address)
-            .or_default()
-            .fetch_add(1, Ordering::SeqCst);
+        // TODO: store address -> lifetime_id ~forever.
+        let lifetime_id = {
+            let mut lls = self.lifetimes.lock().unwrap();
+            match lls.entry(address) {
+                Entry::Occupied(ref mut e) => {
+                    let l = e.get_mut();
+                    l.at = Instant::now();
+                    l.id
+                }
+                Entry::Vacant(v) => {
+                    v.insert(LifetimeLease {
+                        id: DEFAULT_LIFETIME_ID,
+                        at: Instant::now(),
+                    });
+                    DEFAULT_LIFETIME_ID
+                }
+            }
+        };
 
-        Ok(Response::new(RegisterResponse { lifetime_id }))
+        Ok(Response::new(RegisterResponse {
+            lifetime_id,
+            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+        }))
     }
 
     async fn heart_beat(
@@ -108,10 +122,25 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 if lifetime_id > lifetime_lease.id {
                     todo!("Error: Workers cannot have a higher lifetime id than the lease, there is a bug.");
                 }
-                if lifetime_id < lifetime_lease.id
-                    || now.checked_duration_since(lifetime_lease.at).unwrap()
-                        > self.lifetime_timeout
-                {
+
+                let expired_lifetime_id = lifetime_id < lifetime_lease.id;
+                let dur_since_last_heart_beat =
+                    now.checked_duration_since(lifetime_lease.at).unwrap();
+                let lifetime_id_timeout = dur_since_last_heart_beat > self.lifetime_timeout;
+
+                if expired_lifetime_id || lifetime_id_timeout {
+                    if expired_lifetime_id {
+                        eprintln!(
+                            "expired_lifetime_id: got={}, want={}",
+                            lifetime_id, lifetime_lease.id
+                        );
+                    }
+                    if lifetime_id_timeout {
+                        eprintln!(
+                            "lifetime_id_timeout: dur_since_last_heart_beat={:?}",
+                            dur_since_last_heart_beat
+                        );
+                    }
                     lifetime_lease.id += 1;
                 }
 
@@ -120,7 +149,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
             Entry::Vacant(_) => {
                 return Err(Status::invalid_argument(format!(
-                    "{} does not have a lifetime lease.",
+                    "{} does not have a lifetime lease",
                     address
                 )));
             }
