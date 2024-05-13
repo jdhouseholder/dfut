@@ -1,7 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::{
@@ -116,6 +118,7 @@ impl DScheduler {
 #[derive(Debug, Clone)]
 pub(crate) struct DSchedulerClient {
     global_scheduler: GlobalSchedulerServiceClient<Channel>,
+    worker_service_client_cache: Arc<Mutex<LruCache<String, WorkerServiceClient<Channel>>>>,
 }
 
 impl DSchedulerClient {
@@ -132,21 +135,12 @@ impl DSchedulerClient {
     pub(crate) async fn new(global_scheduler_address: &str) -> Self {
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let global_scheduler = Self::gs_connect(endpoint).await;
-        Self { global_scheduler }
-    }
-
-    async fn schedule_with_retry(&self, w: &Work) -> String {
-        for i in 0..5 {
-            let mut global_scheduler = self.global_scheduler.clone();
-            let req: ScheduleRequest = w.into();
-            let ScheduleResponse { address } =
-                global_scheduler.schedule(req).await.unwrap().into_inner();
-            if let Some(address) = address {
-                return address;
-            }
-            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
+        Self {
+            global_scheduler,
+            worker_service_client_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(20).unwrap(),
+            ))),
         }
-        panic!("unable to find worker that advertises {}", w.fn_name);
     }
 
     async fn worker_service_connect(endpoint: Endpoint) -> WorkerServiceClient<Channel> {
@@ -161,10 +155,43 @@ impl DSchedulerClient {
         panic!();
     }
 
+    async fn schedule_with_retry(&self, w: &Work) -> String {
+        let mut global_scheduler = self.global_scheduler.clone();
+        for i in 0..5 {
+            let req: ScheduleRequest = w.into();
+            let ScheduleResponse { address } =
+                global_scheduler.schedule(req).await.unwrap().into_inner();
+            if let Some(address) = address {
+                return address;
+            }
+            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
+        }
+        panic!()
+    }
+
     pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {
         let address = self.schedule_with_retry(&w).await;
-        let endpoint: Endpoint = address.parse().unwrap();
-        let mut client = Self::worker_service_connect(endpoint).await;
+
+        let maybe_client = self
+            .worker_service_client_cache
+            .lock()
+            .unwrap()
+            .get(&address)
+            .map(|client| client.clone())
+            .clone();
+
+        let mut client = match maybe_client {
+            Some(client) => client,
+            None => {
+                let endpoint: Endpoint = address.parse().unwrap();
+                let client = Self::worker_service_connect(endpoint).await;
+                self.worker_service_client_cache
+                    .lock()
+                    .unwrap()
+                    .put(address.clone(), client.clone());
+                client
+            }
+        };
         let req = w.into_do_work_request(task_id);
         let DoWorkResponse {
             address,
