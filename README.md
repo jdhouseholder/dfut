@@ -8,7 +8,6 @@ Example usage can be found at https://github.com/jdhouseholder/dfut-example/blob
 A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries deployed to a cluster of computers, some driver client (perhaps a cli or a server), and the `dfut-ctl` cli.
 
 ## TODOs
-* Pool connections, timeouts, retries, backoff.
-* Use performant data format like message pack.  
-* DChannels
-* d\_box
+* Refactor retries and backoff.
+* Implement DChannels.
+* Consider if we want to support driver side d\_box.
