@@ -147,10 +147,7 @@ impl LocalStore {
     async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
         let mut m = self.blob_store.lock().unwrap();
         match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } => {
-                *ref_count += n;
-            }
-            Entry::DBlob { ref_count, .. } => {
+            Entry::Watch { ref_count, .. } | Entry::DBlob { ref_count, .. } => {
                 *ref_count += n;
             }
         }
@@ -162,13 +159,7 @@ impl LocalStore {
         let mut remove = false;
 
         match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } => {
-                *ref_count -= by;
-                if *ref_count == 0 {
-                    remove = true;
-                }
-            }
-            Entry::DBlob { ref_count, .. } => {
+            Entry::Watch { ref_count, .. } | Entry::DBlob { ref_count, .. } => {
                 *ref_count -= by;
                 if *ref_count == 0 {
                     remove = true;
