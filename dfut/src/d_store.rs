@@ -1,5 +1,6 @@
 // TODO: Alternatively we can mux onto one rpc client.
 use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
+use std::num::NonZeroUsize;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -9,7 +10,10 @@ use std::sync::{
 use lru::LruCache;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tonic::{transport::Endpoint, Request, Response, Status};
+use tonic::{
+    transport::{Channel, Endpoint},
+    Request, Response, Status,
+};
 
 use crate::{d_scheduler::worker_service::DoWorkResponse, Error};
 
@@ -287,13 +291,15 @@ impl DStore {
 pub struct DStoreClient {
     // TODO: LRU cache + in flight tracking goes here.
     lru: Arc<Mutex<LruCache<DStoreId, Vec<u8>>>>,
+    d_store_service_client_cache: Arc<Mutex<LruCache<String, DStoreServiceClient<Channel>>>>,
 }
 
 impl Default for DStoreClient {
     fn default() -> Self {
         Self {
-            lru: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(100).unwrap(),
+            lru: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap()))),
+            d_store_service_client_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(100).unwrap(),
             ))),
         }
     }
@@ -304,16 +310,38 @@ impl DStoreClient {
         Self::default()
     }
 
+    async fn get_or_connect(&self, address: &str) -> DStoreServiceClient<Channel> {
+        let maybe_client = self
+            .d_store_service_client_cache
+            .lock()
+            .unwrap()
+            .get(address)
+            .map(|client| client.clone())
+            .clone();
+
+        match maybe_client {
+            Some(client) => client,
+            None => {
+                let endpoint: Endpoint = address.parse().unwrap();
+                let client = DStoreServiceClient::connect(endpoint)
+                    .await
+                    .unwrap()
+                    .max_encoding_message_size(usize::MAX)
+                    .max_decoding_message_size(usize::MAX);
+                self.d_store_service_client_cache
+                    .lock()
+                    .unwrap()
+                    .put(address.to_string(), client.clone());
+                client
+            }
+        }
+    }
+
     pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
-        let endpoint: Endpoint = key.address.parse().unwrap();
-        let mut client = DStoreServiceClient::connect(endpoint)
-            .await
-            .unwrap()
-            .max_encoding_message_size(usize::MAX)
-            .max_decoding_message_size(usize::MAX);
+        let mut client = self.get_or_connect(&key.address).await;
         let GetOrWatchResponse { object } = client
             .get_or_watch(GetOrWatchRequest {
                 address: key.address.clone(),
@@ -332,8 +360,7 @@ impl DStoreClient {
     }
 
     pub(crate) async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
-        let endpoint: Endpoint = key.address.parse().unwrap();
-        let mut client = DStoreServiceClient::connect(endpoint).await.unwrap();
+        let mut client = self.get_or_connect(&key.address).await;
         let _ = client
             .share_n(ShareNRequest {
                 address: key.address.clone(),
@@ -348,8 +375,7 @@ impl DStoreClient {
     }
 
     pub(crate) async fn decrement_or_remove(&self, key: DStoreId, by: u64) -> Result<(), Error> {
-        let endpoint: Endpoint = key.address.parse().unwrap();
-        let mut client = DStoreServiceClient::connect(endpoint).await.unwrap();
+        let mut client = self.get_or_connect(&key.address).await;
         let _ = client
             .decrement_or_remove(DecrementOrRemoveRequest {
                 address: key.address,
