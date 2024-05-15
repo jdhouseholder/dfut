@@ -2,9 +2,9 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use log::error;
 use rand::seq::SliceRandom;
 use tonic::{transport::Server, Request, Response, Status};
+use tracing::error;
 
 pub(crate) mod global_scheduler_service {
     tonic::include_proto!("global_scheduler_service");

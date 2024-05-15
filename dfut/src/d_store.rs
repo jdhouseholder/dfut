@@ -8,6 +8,7 @@ use std::sync::{
 
 // TODO: Feature flag lru.
 use lru::LruCache;
+use metrics::counter;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tonic::{
@@ -68,6 +69,8 @@ struct LocalStore {
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
     fn insert(&self, key: DStoreId, b: Vec<u8>) {
+        counter!("local_store::insert").increment(1);
+
         let mut m = self.blob_store.lock().unwrap();
 
         let mut new_ref_count = 1;
@@ -98,6 +101,8 @@ impl LocalStore {
     }
 
     async fn get_or_watch(&self, key: DStoreId) -> Option<Vec<u8>> {
+        counter!("local_store::get_or_watch").increment(1);
+
         let mut rx = {
             let mut m = self.blob_store.lock().unwrap();
             let rx = match m.entry(key) {
@@ -145,6 +150,8 @@ impl LocalStore {
     }
 
     async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
+        counter!("local_store::share").increment(1);
+
         let mut m = self.blob_store.lock().unwrap();
         match m.get_mut(&key).unwrap() {
             Entry::Watch { ref_count, .. } | Entry::DBlob { ref_count, .. } => {
@@ -155,6 +162,8 @@ impl LocalStore {
     }
 
     async fn decrement_or_remove(&self, key: &DStoreId, by: u64) -> bool {
+        counter!("local_store::decrement_or_remove").increment(1);
+
         let mut m = self.blob_store.lock().unwrap();
         let mut remove = false;
 
@@ -175,6 +184,8 @@ impl LocalStore {
     }
 
     fn clear(&self) {
+        counter!("local_store::clear").increment(1);
+
         let mut m = self.blob_store.lock().unwrap();
         for e in m.values() {
             match e {

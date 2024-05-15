@@ -8,9 +8,8 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.197", features = ["derive"] }
 rmp-serde = "1.3.0"
 rand = "0.8.5"
-log = "0.4.21"
-env_logger = "0.11.3"
 tracing = "0.1.40"
+metrics = "0.22.3"
 lru = "0.12.3"
 
 tonic = "0.11.0"
