@@ -99,7 +99,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         Ok(Response::new(RegisterResponse {
             lifetime_id,
-            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
         }))
     }
 

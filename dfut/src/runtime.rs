@@ -40,7 +40,7 @@ pub struct RootRuntime {
     shared_runtime_state: Arc<SharedRuntimeState>,
 
     local_server_address: String,
-    heartbeat_timeout: u64,
+    heart_beat_timeout: u64,
 }
 
 impl RootRuntime {
@@ -53,7 +53,7 @@ impl RootRuntime {
 
         let RegisterResponse {
             lifetime_id,
-            heartbeat_timeout,
+            heart_beat_timeout,
         } = d_scheduler
             .register(local_server_address, fn_names)
             .await
@@ -74,7 +74,7 @@ impl RootRuntime {
             }),
 
             local_server_address: local_server_address.to_string(),
-            heartbeat_timeout,
+            heart_beat_timeout,
         }
     }
 
@@ -94,7 +94,7 @@ impl RootRuntime {
 
     async fn heart_beat_forever(&self) {
         // TODO: shutdown via select.
-        let sleep_for = std::time::Duration::from_secs(self.heartbeat_timeout / 3);
+        let sleep_for = std::time::Duration::from_secs(self.heart_beat_timeout / 3);
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
