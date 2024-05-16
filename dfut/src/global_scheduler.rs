@@ -26,9 +26,15 @@ struct LifetimeLease {
 }
 
 #[derive(Debug, Default)]
+struct Lifetimes {
+    list_id: u64,
+    m: HashMap<String, LifetimeLease>,
+}
+
+#[derive(Debug, Default)]
 pub struct GlobalScheduler {
     fn_availability: Mutex<HashMap<String, Vec<String>>>,
-    lifetimes: Mutex<HashMap<String, LifetimeLease>>,
+    lifetimes: Mutex<Lifetimes>,
     lifetime_timeout: Duration,
 }
 
@@ -81,7 +87,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         // TODO: store address -> lifetime_id ~forever.
         let lifetime_id = {
             let mut lls = self.lifetimes.lock().unwrap();
-            match lls.entry(address) {
+            match lls.m.entry(address) {
                 Entry::Occupied(ref mut e) => {
                     let l = e.get_mut();
                     l.at = Instant::now();
@@ -110,11 +116,20 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let HeartBeatRequest {
             address,
             lifetime_id,
+            lifetime_list_id,
         } = request.into_inner();
 
         let mut lifetimes = self.lifetimes.lock().unwrap();
 
-        let lifetime_id = match lifetimes.entry(address.clone()) {
+        if lifetime_list_id == lifetimes.list_id {
+            return Ok(Response::new(HeartBeatResponse {
+                lifetime_id,
+                lifetime_list_id: lifetimes.list_id,
+                lifetimes: Vec::new(),
+            }));
+        }
+
+        let lifetime_id = match lifetimes.m.entry(address.clone()) {
             Entry::Occupied(ref mut o) => {
                 let now = Instant::now();
 
@@ -156,7 +171,9 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
         };
 
+        let lifetime_list_id = lifetimes.list_id;
         let lifetimes = lifetimes
+            .m
             .iter()
             .map(|(address, lifetime_lease)| Lifetime {
                 address: address.to_string(),
@@ -166,6 +183,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         Ok(Response::new(HeartBeatResponse {
             lifetime_id,
+            lifetime_list_id,
             lifetimes,
         }))
     }

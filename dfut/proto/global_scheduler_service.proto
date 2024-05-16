@@ -14,6 +14,7 @@ message RegisterResponse {
 message HeartBeatRequest {
 	string address = 1;
 	fixed64 lifetime_id = 2;
+	fixed64 lifetime_list_id = 3;
 }
 
 // Lifetime of each peer. We'll use this to know when a peer has failed.
@@ -24,7 +25,8 @@ message Lifetime {
 
 message HeartBeatResponse {
 	fixed64 lifetime_id = 1;
-	repeated Lifetime lifetimes = 2;
+	fixed64 lifetime_list_id = 2;
+	repeated Lifetime lifetimes = 3;
 }
 
 message ScheduleRequest {

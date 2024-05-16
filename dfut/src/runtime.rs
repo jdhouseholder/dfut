@@ -30,6 +30,7 @@ use crate::{
 struct SharedRuntimeState {
     d_scheduler: DScheduler,
     d_store: Arc<DStore>,
+    lifetime_list_id: AtomicU64,
     lifetimes: Mutex<HashMap<String, u64>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
@@ -68,6 +69,7 @@ impl RootRuntime {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 d_scheduler,
                 d_store,
+                lifetime_list_id: AtomicU64::new(0),
                 lifetimes: Mutex::default(),
                 lifetime_id,
                 next_task_id,
@@ -98,22 +100,33 @@ impl RootRuntime {
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
+            let local_lifetime_list_id = self
+                .shared_runtime_state
+                .lifetime_list_id
+                .load(Ordering::SeqCst);
+
             // TODO: retry & graceful fail.
             let HeartBeatResponse {
                 lifetime_id,
+                lifetime_list_id,
                 lifetimes,
             } = self
                 .shared_runtime_state
                 .d_scheduler
-                .heart_beat(&self.local_server_address, local_lifetime_id)
+                .heart_beat(
+                    &self.local_server_address,
+                    local_lifetime_id,
+                    local_lifetime_list_id,
+                )
                 .await
                 .unwrap();
 
-            // TODO: can pass a lifetimes version id to avoid sending lifetimes every time.
-            *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes
-                .into_iter()
-                .map(|l| (l.address, l.lifetime_id))
-                .collect();
+            if lifetime_list_id > local_lifetime_list_id {
+                *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes
+                    .into_iter()
+                    .map(|l| (l.address, l.lifetime_id))
+                    .collect();
+            }
 
             if lifetime_id != local_lifetime_id {
                 // If we hit this case it means we didn't renew our lifetime lease, so either the

@@ -74,12 +74,14 @@ impl DScheduler {
         &self,
         address: &str,
         lifetime_id: u64,
+        lifetime_list_id: u64,
     ) -> Result<HeartBeatResponse, Box<dyn std::error::Error>> {
         let mut global_scheduler = self.d_scheduler_client.global_scheduler.clone();
         Ok(global_scheduler
             .heart_beat(HeartBeatRequest {
                 address: address.to_string(),
                 lifetime_id,
+                lifetime_list_id,
             })
             .await?
             .into_inner())
