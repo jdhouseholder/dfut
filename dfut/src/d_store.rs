@@ -1,4 +1,3 @@
-// TODO: Alternatively we can mux onto one rpc client.
 use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::{
@@ -54,6 +53,8 @@ enum Entry {
         subscribers: u64,
         ref_count: u64,
     },
+    // TODO: we can store Box<dyn Any> and lazy encode then store the Vec<u8>.
+    // This means we avoid encode/decode in the local work case.
     DBlob {
         b: Vec<u8>,
         ref_count: u64,
