@@ -199,7 +199,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 let fn_name = match self {
                     #(#work_cases)*
                 };
-                let args = dfut::rmp_serde::to_vec(self).unwrap();
+                let args = dfut::bincode::serialize(self).unwrap();
                 dfut::Work {
                     fn_name,
                     args,
@@ -335,7 +335,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
             ) -> Result<dfut::tonic::Response<dfut::DoWorkResponse>, dfut::tonic::Status> {
                 let dfut::DoWorkRequest { task_id, fn_name, args } = request.into_inner();
 
-                let args: #work_enum_ident = dfut::rmp_serde::from_slice(&args).unwrap();
+                let args: #work_enum_ident = dfut::bincode::deserialize(&args).unwrap();
                 let resp = match args {
                     #(#handle_cases),*
                 };

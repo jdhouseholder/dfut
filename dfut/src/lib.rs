@@ -29,7 +29,7 @@ pub use work::{IntoWork, Work};
 
 pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-pub use rmp_serde;
+pub use bincode;
 pub use serde;
 pub use tonic;
 
