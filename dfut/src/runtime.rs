@@ -227,9 +227,9 @@ impl Runtime {
             .map(|v| d_store_id.lifetime_id >= *v)
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<Arc<T>, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static + std::fmt::Debug,
+        T: DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
@@ -450,9 +450,9 @@ impl RuntimeClient {
         d_store_id.into()
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<Arc<T>, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id.clone()).await,

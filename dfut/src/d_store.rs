@@ -6,7 +6,6 @@ use std::sync::{
     Arc, Mutex,
 };
 
-// TODO: Feature flag lru.
 use lru::LruCache;
 use metrics::counter;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -17,6 +16,16 @@ use tonic::{
 };
 
 use crate::{d_scheduler::worker_service::DoWorkResponse, Error};
+
+pub(crate) mod d_store_service {
+    tonic::include_proto!("d_store_service");
+}
+
+use d_store_service::{
+    d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
+    DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
+    ShareNRequest, ShareNResponse,
+};
 
 trait ValueTrait: erased_serde::Serialize + std::fmt::Debug + Any + Send + Sync + 'static {
     fn as_serialize(&self) -> &dyn erased_serde::Serialize;
@@ -35,16 +44,6 @@ where
         self
     }
 }
-
-pub(crate) mod d_store_service {
-    tonic::include_proto!("d_store_service");
-}
-
-use d_store_service::{
-    d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
-    DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
-    ShareNRequest, ShareNResponse,
-};
 
 #[derive(Debug, std::hash::Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone)]
 pub struct DStoreId {
@@ -263,14 +262,15 @@ impl DStore {
         Ok(())
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<Arc<T>, Error>
+    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: DeserializeOwned + Clone + Send + Sync + 'static,
     {
         if key.address != self.current_address {
-            self.d_store_client.get_or_watch(key).await
+            let t: T = self.d_store_client.get_or_watch(key).await?;
+            Ok(t)
         } else {
-            let t = self
+            let t: Arc<T> = self
                 .local_store
                 .get_or_watch(key.clone())
                 .await
@@ -278,7 +278,7 @@ impl DStore {
                 .as_any()
                 .downcast()
                 .unwrap();
-            Ok(t)
+            Ok((*t).clone())
         }
     }
 
@@ -309,7 +309,6 @@ impl DStore {
 
 #[derive(Debug)]
 pub struct DStoreClient {
-    // TODO: LRU cache + in flight tracking goes here.
     lru: Arc<Mutex<LruCache<DStoreId, Arc<dyn Any + Send + Sync + 'static>>>>,
     d_store_service_client_cache: Arc<Mutex<LruCache<String, DStoreServiceClient<Channel>>>>,
 }
@@ -357,17 +356,18 @@ impl DStoreClient {
         }
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<Arc<T>, Error>
+    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: DeserializeOwned + Clone + Send + Sync + 'static,
     {
-        if let Some(a) = {
+        if let Some(v) = {
             let mut lru = self.lru.lock().unwrap();
-            lru.get(&key).map(|a| Arc::clone(&a).downcast().unwrap())
+            let v: Option<Arc<T>> = lru.get(&key).map(|a| Arc::clone(&a).downcast().unwrap());
+            v
         } {
             // MUST decrement remote. We can omit the object transfer.
             self.decrement_or_remove(key, 1).await?;
-            return Ok(a);
+            return Ok((*v).clone());
         }
 
         let mut client = self.get_or_connect(&key.address).await;
@@ -382,13 +382,10 @@ impl DStoreClient {
             .unwrap()
             .into_inner();
 
-        // TODO: We can avoid this if we know if the object has been deallocated.
-        let t: Arc<T> = Arc::new(bincode::deserialize(&object).unwrap());
+        let t: T = bincode::deserialize(&object).unwrap();
 
-        self.lru
-            .lock()
-            .unwrap()
-            .put(key, Arc::clone(&t) as Arc<dyn Any + Send + Sync + 'static>);
+        // TODO: We can avoid this if we know if the object has been deallocated.
+        self.lru.lock().unwrap().put(key, Arc::new(t.clone()));
 
         Ok(t)
     }
@@ -535,9 +532,15 @@ mod local_store_test {
         let want = vec![1];
 
         local_store.insert(key.clone(), want.clone());
-        let got = local_store.get_or_watch(key).await.unwrap();
+        let got: Arc<Vec<u8>> = local_store
+            .get_or_watch(key)
+            .await
+            .unwrap()
+            .as_any()
+            .downcast()
+            .unwrap();
 
-        assert_eq!(got, want);
+        assert_eq!(*got, want);
     }
 
     #[tokio::test]
@@ -556,8 +559,14 @@ mod local_store_test {
             let key = key.clone();
             let want = want.clone();
             async move {
-                let got = local_store.get_or_watch(key).await.unwrap();
-                assert_eq!(got, want);
+                let got: Arc<Vec<u8>> = local_store
+                    .get_or_watch(key)
+                    .await
+                    .unwrap()
+                    .as_any()
+                    .downcast()
+                    .unwrap();
+                assert_eq!(*got, want);
             }
         });
 
