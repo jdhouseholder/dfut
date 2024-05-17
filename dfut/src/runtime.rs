@@ -227,9 +227,9 @@ impl Runtime {
             .map(|v| d_store_id.lifetime_id >= *v)
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<Arc<T>, Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send + Sync + 'static + std::fmt::Debug,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
@@ -304,9 +304,9 @@ impl Runtime {
         }
     }
 
-    pub async fn d_box<T>(&self, t: &T) -> Result<DFut<T>, Error>
+    pub async fn d_box<T>(&self, t: T) -> Result<DFut<T>, Error>
     where
-        T: Serialize + Send + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
         let d_store_id = self.next_d_store_id();
         self.shared_runtime_state
@@ -344,7 +344,7 @@ impl Runtime {
     fn do_local_work<F, T>(&self, fn_name: &str, fut: F) -> DStoreId
     where
         F: Future<Output = T> + Send + 'static,
-        T: Serialize + Send + Sync + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
         let d_store_id = self.next_d_store_id();
 
@@ -363,7 +363,7 @@ impl Runtime {
                 let t = fut.await;
                 rt.shared_runtime_state
                     .d_store
-                    .publish(d_store_id, &t)
+                    .publish(d_store_id, t)
                     .unwrap();
 
                 rt.shared_runtime_state
@@ -378,7 +378,7 @@ impl Runtime {
     pub fn do_local_work_dwr<F, T>(&self, fn_name: &str, fut: F) -> DoWorkResponse
     where
         F: Future<Output = T> + Send + 'static,
-        T: Serialize + Send + Sync + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
         let d_store_id = self.do_local_work(fn_name, fut);
 
@@ -388,7 +388,7 @@ impl Runtime {
     pub fn do_local_work_fut<F, T>(&self, fn_name: &str, fut: F) -> DFut<T>
     where
         F: Future<Output = T> + Send + 'static,
-        T: Serialize + Send + Sync + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
         let d_store_id = self.do_local_work(fn_name, fut);
 
@@ -450,9 +450,9 @@ impl RuntimeClient {
         d_store_id.into()
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<Arc<T>, Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id.clone()).await,
@@ -490,7 +490,7 @@ impl RuntimeClient {
         }
     }
 
-    pub async fn d_box<T>(&self, _t: &T) -> Result<DFut<T>, Error>
+    pub async fn d_box<T>(&self, _t: T) -> Result<DFut<T>, Error>
     where
         T: Serialize + Send + 'static,
     {

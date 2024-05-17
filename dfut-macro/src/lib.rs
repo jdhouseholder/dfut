@@ -219,9 +219,9 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                Self { runtime }
            }
 
-            pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> Result<T, dfut::Error>
+            pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> Result<std::sync::Arc<T>, dfut::Error>
             where
-                T: dfut::DeserializeOwned,
+                T: dfut::DeserializeOwned + Send + Sync + 'static + std::fmt::Debug,
             {
                 self.runtime.wait(t).await
             }
@@ -282,9 +282,9 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 ).await;
             }
 
-            pub async fn d_await<T>(&self, d_fut: DFut<T>) -> T
+            pub async fn d_await<T>(&self, d_fut: DFut<T>) -> std::sync::Arc<T>
             where
-                T: dfut::DeserializeOwned
+                T: dfut::DeserializeOwned + Send + Sync + 'static + std::fmt::Debug,
             {
                 self.runtime.wait(d_fut).await.unwrap()
             }
@@ -296,9 +296,9 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 self.runtime.cancel(d_fut).await.unwrap()
             }
 
-            pub async fn d_box<T>(&self, t: &T) -> DFut<T>
+            pub async fn d_box<T>(&self, t: T) -> DFut<T>
             where
-                T: dfut::Serialize + Send + Sync + 'static
+                T: dfut::Serialize + std::fmt::Debug + Send + Sync + 'static
             {
                 self.runtime.d_box(t).await.unwrap()
             }

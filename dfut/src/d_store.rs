@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::{
@@ -16,6 +17,24 @@ use tonic::{
 };
 
 use crate::{d_scheduler::worker_service::DoWorkResponse, Error};
+
+trait ValueTrait: erased_serde::Serialize + std::fmt::Debug + Any + Send + Sync + 'static {
+    fn as_serialize(&self) -> &dyn erased_serde::Serialize;
+    fn as_any(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync + 'static)>;
+}
+
+impl<T> ValueTrait for T
+where
+    T: erased_serde::Serialize + std::fmt::Debug + Any + Send + Sync + 'static,
+{
+    fn as_serialize(&self) -> &dyn erased_serde::Serialize {
+        self
+    }
+
+    fn as_any(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync + 'static)> {
+        self
+    }
+}
 
 pub(crate) mod d_store_service {
     tonic::include_proto!("d_store_service");
@@ -49,14 +68,14 @@ impl Into<DoWorkResponse> for DStoreId {
 #[derive(Debug)]
 enum Entry {
     Watch {
-        tx: broadcast::Sender<Option<Vec<u8>>>,
+        tx: broadcast::Sender<Option<Arc<dyn ValueTrait>>>,
         subscribers: u64,
         ref_count: u64,
     },
     // TODO: we can store Box<dyn Any> and lazy encode then store the Vec<u8>.
     // This means we avoid encode/decode in the local work case.
-    DBlob {
-        b: Vec<u8>,
+    Here {
+        t: Arc<dyn ValueTrait>,
         ref_count: u64,
     },
 }
@@ -69,8 +88,13 @@ struct LocalStore {
 // is the local store simple iff we require an extra call to decrement ref?
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
-    fn insert(&self, key: DStoreId, b: Vec<u8>) {
+    fn insert<T>(&self, key: DStoreId, t: T)
+    where
+        T: ValueTrait,
+    {
         counter!("local_store::insert").increment(1);
+
+        let t: Arc<dyn ValueTrait> = Arc::new(t);
 
         let mut m = self.blob_store.lock().unwrap();
 
@@ -84,24 +108,24 @@ impl LocalStore {
             // subscribers must be less than or equal to ref_count.
             if subscribers == ref_count {
                 // All refs are currently subscribed. We can't have any new gets or shares.
-                tx.send(Some(b)).unwrap();
+                tx.send(Some(t)).unwrap();
                 return;
             } else {
                 // There are still outstanding refs, we need to store.
-                tx.send(Some(b.clone())).unwrap();
+                tx.send(Some(Arc::clone(&t))).unwrap();
                 new_ref_count = ref_count - subscribers;
             }
         }
         m.insert(
             key,
-            Entry::DBlob {
-                b,
+            Entry::Here {
+                t,
                 ref_count: new_ref_count,
             },
         );
     }
 
-    async fn get_or_watch(&self, key: DStoreId) -> Option<Vec<u8>> {
+    async fn get_or_watch(&self, key: DStoreId) -> Option<Arc<dyn ValueTrait>> {
         counter!("local_store::get_or_watch").increment(1);
 
         let mut rx = {
@@ -122,18 +146,18 @@ impl LocalStore {
                         Entry::Watch { subscribers, .. } => {
                             *subscribers += 1;
                         }
-                        Entry::DBlob { b, ref_count } => {
+                        Entry::Here { t, ref_count } => {
                             *ref_count -= 1;
                             if *ref_count == 0 {
                                 remove = true;
                             } else {
-                                return Some(b.clone());
+                                return Some(Arc::clone(&t));
                             }
                         }
                     }
                     if remove {
                         match o.remove() {
-                            Entry::DBlob { b, .. } => return Some(b),
+                            Entry::Here { t, .. } => return Some(t),
                             _ => panic!(),
                         }
                     }
@@ -155,7 +179,7 @@ impl LocalStore {
 
         let mut m = self.blob_store.lock().unwrap();
         match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } | Entry::DBlob { ref_count, .. } => {
+            Entry::Watch { ref_count, .. } | Entry::Here { ref_count, .. } => {
                 *ref_count += n;
             }
         }
@@ -169,7 +193,7 @@ impl LocalStore {
         let mut remove = false;
 
         match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } | Entry::DBlob { ref_count, .. } => {
+            Entry::Watch { ref_count, .. } | Entry::Here { ref_count, .. } => {
                 *ref_count -= by;
                 if *ref_count == 0 {
                     remove = true;
@@ -193,7 +217,7 @@ impl LocalStore {
                 Entry::Watch { tx, .. } => {
                     tx.send(None).unwrap();
                 }
-                Entry::DBlob { .. } => {}
+                Entry::Here { .. } => {}
             }
         }
         m.clear();
@@ -231,37 +255,30 @@ impl DStore {
         }
     }
 
-    pub(crate) fn publish<T>(&self, key: DStoreId, t: &T) -> Result<(), Error>
+    pub(crate) fn publish<T>(&self, key: DStoreId, t: T) -> Result<(), Error>
     where
-        T: Serialize + Send + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
-        let b = bincode::serialize(t).unwrap();
-        self.local_store.insert(key, b);
+        self.local_store.insert(key, t);
         Ok(())
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
+    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<Arc<T>, Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
-        if let Some(b) = {
-            let mut lru = self.d_store_client.lru.lock().unwrap();
-            lru.get(&key).map(|v| v.to_vec())
-        } {
-            // MUST decrement remote. We can omit the object transfer.
-            self.d_store_client.decrement_or_remove(key, 1).await?;
-            return Ok(bincode::deserialize(&b).unwrap());
-        }
-
         if key.address != self.current_address {
             self.d_store_client.get_or_watch(key).await
         } else {
-            let b = self
+            let t = self
                 .local_store
                 .get_or_watch(key.clone())
                 .await
-                .ok_or(Error::System)?;
-            Ok(bincode::deserialize(&b).unwrap())
+                .ok_or(Error::System)?
+                .as_any()
+                .downcast()
+                .unwrap();
+            Ok(t)
         }
     }
 
@@ -293,7 +310,7 @@ impl DStore {
 #[derive(Debug)]
 pub struct DStoreClient {
     // TODO: LRU cache + in flight tracking goes here.
-    lru: Arc<Mutex<LruCache<DStoreId, Vec<u8>>>>,
+    lru: Arc<Mutex<LruCache<DStoreId, Arc<dyn Any + Send + Sync + 'static>>>>,
     d_store_service_client_cache: Arc<Mutex<LruCache<String, DStoreServiceClient<Channel>>>>,
 }
 
@@ -340,10 +357,19 @@ impl DStoreClient {
         }
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
+    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<Arc<T>, Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
+        if let Some(a) = {
+            let mut lru = self.lru.lock().unwrap();
+            lru.get(&key).map(|a| Arc::clone(&a).downcast().unwrap())
+        } {
+            // MUST decrement remote. We can omit the object transfer.
+            self.decrement_or_remove(key, 1).await?;
+            return Ok(a);
+        }
+
         let mut client = self.get_or_connect(&key.address).await;
         let GetOrWatchResponse { object } = client
             .get_or_watch(GetOrWatchRequest {
@@ -357,9 +383,14 @@ impl DStoreClient {
             .into_inner();
 
         // TODO: We can avoid this if we know if the object has been deallocated.
-        self.lru.lock().unwrap().put(key, object.clone());
+        let t: Arc<T> = Arc::new(bincode::deserialize(&object).unwrap());
 
-        return Ok(bincode::deserialize(&object).unwrap());
+        self.lru
+            .lock()
+            .unwrap()
+            .put(key, Arc::clone(&t) as Arc<dyn Any + Send + Sync + 'static>);
+
+        Ok(t)
     }
 
     pub(crate) async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
@@ -417,12 +448,13 @@ impl DStoreService for Arc<DStore> {
             object_id,
         };
 
-        let b = self
+        let t: Arc<dyn ValueTrait> = self
             .local_store
             .get_or_watch(id.clone())
             .await
             .ok_or_else(|| Status::not_found("DFut canceled."))?;
 
+        let b = bincode::serialize(t.as_serialize()).unwrap();
         Ok(Response::new(GetOrWatchResponse { object: b }))
     }
 
