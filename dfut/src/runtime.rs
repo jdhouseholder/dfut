@@ -61,6 +61,7 @@ impl RootRuntime {
         let RegisterResponse {
             lifetime_id,
             heart_beat_timeout,
+            ..
         } = d_scheduler
             .register(local_server_address, fn_names)
             .await
@@ -119,6 +120,7 @@ impl RootRuntime {
                 lifetime_id,
                 lifetime_list_id,
                 lifetimes,
+                ..
             } = self
                 .shared_runtime_state
                 .d_scheduler

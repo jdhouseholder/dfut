@@ -49,7 +49,7 @@ impl GlobalScheduler {
             .clone()
     }
 
-    pub async fn serve(address: &str) {
+    pub async fn serve(address: &str, peers: Vec<String>) {
         let global_scheduler = Arc::new(Self {
             lifetime_timeout: Duration::from_secs(5),
             ..Default::default()
@@ -104,6 +104,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         };
 
         Ok(Response::new(RegisterResponse {
+            leader_redirect: None,
             lifetime_id,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
         }))
@@ -123,6 +124,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         if lifetime_list_id == lifetimes.list_id {
             return Ok(Response::new(HeartBeatResponse {
+                leader_redirect: None,
                 lifetime_id,
                 lifetime_list_id: lifetimes.list_id,
                 lifetimes: Vec::new(),
@@ -182,6 +184,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             .collect();
 
         Ok(Response::new(HeartBeatResponse {
+            leader_redirect: None,
             lifetime_id,
             lifetime_list_id,
             lifetimes,
@@ -196,7 +199,10 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         let address = self.schedule_fn(&fn_name);
 
-        Ok(Response::new(ScheduleResponse { address }))
+        Ok(Response::new(ScheduleResponse {
+            leader_redirect: None,
+            address,
+        }))
     }
 
     async fn un_register(

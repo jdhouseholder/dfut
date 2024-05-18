@@ -7,8 +7,9 @@ message RegisterRequest {
 }
 
 message RegisterResponse {
-	fixed64 lifetime_id = 1;
-	fixed64 heart_beat_timeout = 2;
+	optional string leader_redirect = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 heart_beat_timeout = 3;
 }
 
 message HeartBeatRequest {
@@ -24,9 +25,10 @@ message Lifetime {
 }
 
 message HeartBeatResponse {
-	fixed64 lifetime_id = 1;
-	fixed64 lifetime_list_id = 2;
-	repeated Lifetime lifetimes = 3;
+	optional string leader_redirect = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 lifetime_list_id = 3;
+	repeated Lifetime lifetimes = 4;
 }
 
 message ScheduleRequest {
@@ -34,7 +36,8 @@ message ScheduleRequest {
 }
 
 message ScheduleResponse {
-	optional string address = 1;
+	optional string leader_redirect = 1;
+	optional string address = 2;
 }
 
 message UnRegisterRequest {
@@ -42,6 +45,7 @@ message UnRegisterRequest {
 }
 
 message UnRegisterResponse {
+	optional string leader_redirect = 1;
 }
 
 service GlobalSchedulerService {

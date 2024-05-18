@@ -12,6 +12,7 @@ tracing = "0.1.40"
 metrics = "0.22.3"
 lru = "0.12.3"
 erased-serde = "0.4.5"
+raft = "0.7.0"
 
 tonic = "0.11.0"
 prost = "0.12.4"

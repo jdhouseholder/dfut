@@ -149,7 +149,7 @@ impl DSchedulerClient {
         let mut global_scheduler = self.global_scheduler.clone();
         for i in 0..5 {
             let req: ScheduleRequest = w.into();
-            let ScheduleResponse { address } =
+            let ScheduleResponse { address, .. } =
                 global_scheduler.schedule(req).await.unwrap().into_inner();
             if let Some(address) = address {
                 return address;
