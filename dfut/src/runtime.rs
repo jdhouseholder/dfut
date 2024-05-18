@@ -355,6 +355,8 @@ impl Runtime {
         });
 
         tokio::spawn({
+            // TODO: I don't like that we pass two references to the same runtime into the spawn:
+            // once here and once in the macro. Figure out how to fix this.
             let rt = self.clone();
             let d_store_id = d_store_id.clone();
             let fn_name = fn_name.to_string();
