@@ -30,6 +30,8 @@ use crate::{
 
 #[derive(Debug)]
 struct SharedRuntimeState {
+    local_server_address: String,
+
     d_scheduler: DScheduler,
     d_store: Arc<DStore>,
     lifetime_list_id: AtomicU64,
@@ -41,8 +43,6 @@ struct SharedRuntimeState {
 #[derive(Debug, Clone)]
 pub struct RootRuntime {
     shared_runtime_state: Arc<SharedRuntimeState>,
-
-    local_server_address: String,
     heart_beat_timeout: u64,
 }
 
@@ -69,6 +69,7 @@ impl RootRuntime {
 
         Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
+                local_server_address: local_server_address.to_string(),
                 d_scheduler,
                 d_store,
                 lifetime_list_id: AtomicU64::new(0),
@@ -77,7 +78,6 @@ impl RootRuntime {
                 next_task_id,
             }),
 
-            local_server_address: local_server_address.to_string(),
             heart_beat_timeout,
         }
     }
@@ -116,7 +116,7 @@ impl RootRuntime {
                 .shared_runtime_state
                 .d_scheduler
                 .heart_beat(
-                    &self.local_server_address,
+                    &self.shared_runtime_state.local_server_address,
                     local_lifetime_id,
                     local_lifetime_list_id,
                 )
@@ -261,7 +261,6 @@ impl Runtime {
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
                         // try lineage reconstruction here
-                        return Err(Error::System);
                     }
                 }
 
