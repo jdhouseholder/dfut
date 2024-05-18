@@ -361,11 +361,15 @@ impl DStoreClient {
         T: DeserializeOwned + Clone + Send + Sync + 'static,
     {
         if let Some(v) = {
-            let mut lru = self.lru.lock().unwrap();
-            let v: Option<Arc<T>> = lru.get(&key).map(|a| Arc::clone(&a).downcast().unwrap());
+            let v: Option<Arc<T>> = self
+                .lru
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|a| Arc::clone(&a).downcast().unwrap());
             v
         } {
-            // MUST decrement remote. We can omit the object transfer.
+            // MUST decrement remote.
             self.decrement_or_remove(key, 1).await?;
             return Ok((*v).clone());
         }

@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 
 use serde::{de::DeserializeOwned, Serialize};
 use tonic::transport::Server;
@@ -96,7 +97,7 @@ impl RootRuntime {
 
     async fn heart_beat_forever(&self) {
         // TODO: shutdown via select.
-        let sleep_for = std::time::Duration::from_secs(self.heart_beat_timeout / 3);
+        let sleep_for = Duration::from_secs(self.heart_beat_timeout / 3);
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
@@ -358,17 +359,18 @@ impl Runtime {
             let d_store_id = d_store_id.clone();
             let fn_name = fn_name.to_string();
             async move {
-                let token = rt.shared_runtime_state.d_scheduler.start_local_work();
+                let start = Instant::now();
 
                 let t = fut.await;
+
+                rt.shared_runtime_state
+                    .d_scheduler
+                    .finish_local_work(&fn_name, start.elapsed());
+
                 rt.shared_runtime_state
                     .d_store
                     .publish(d_store_id, t)
                     .unwrap();
-
-                rt.shared_runtime_state
-                    .d_scheduler
-                    .finish_local_work(token, &fn_name);
             }
         });
 

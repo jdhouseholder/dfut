@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use lru::LruCache;
 use tonic::transport::{Channel, Endpoint};
@@ -35,10 +35,6 @@ impl FnStats {
 #[derive(Debug, Default, Clone)]
 struct Stats {
     fn_stats: HashMap<String, FnStats>,
-}
-
-pub(crate) struct LocalWorkToken {
-    start: Instant,
 }
 
 #[derive(Debug)]
@@ -93,22 +89,14 @@ impl DScheduler {
         rand::random()
     }
 
-    pub(crate) fn start_local_work(&self) -> LocalWorkToken {
-        LocalWorkToken {
-            start: Instant::now(),
-        }
-    }
-
-    pub(crate) fn finish_local_work(&self, local_work_token: LocalWorkToken, fn_name: &str) {
+    pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration) {
         let mut stats = self.stats.lock().unwrap();
-
-        let dur = local_work_token.start.elapsed();
 
         stats
             .fn_stats
             .entry(fn_name.to_string())
             .or_default()
-            .track(dur);
+            .track(took);
     }
 
     pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {
