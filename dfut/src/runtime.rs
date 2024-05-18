@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
 use tonic::transport::Server;
@@ -23,6 +23,7 @@ use crate::{
         DStoreId,
     },
     global_scheduler::global_scheduler_service::{HeartBeatResponse, RegisterResponse},
+    timer::Timer,
     work::{IntoWork, Work},
     Error,
 };
@@ -91,7 +92,7 @@ impl RootRuntime {
                 .shared_runtime_state
                 .next_task_id
                 .fetch_add(1, Ordering::SeqCst),
-            _inner: Arc::default(),
+            inner: Arc::default(),
         }
     }
 
@@ -206,6 +207,7 @@ enum Call {
 #[derive(Debug, Default)]
 struct InnerRuntime {
     calls: Vec<Call>,
+    timer: Timer,
 }
 
 #[derive(Debug, Clone)]
@@ -215,7 +217,7 @@ pub struct Runtime {
     lifetime_id: u64,
     _parent_task_id: u64,
     task_id: u64,
-    _inner: Arc<Mutex<InnerRuntime>>,
+    inner: Arc<Mutex<InnerRuntime>>,
 }
 
 impl Runtime {
@@ -228,12 +230,34 @@ impl Runtime {
             .map(|v| d_store_id.lifetime_id >= *v)
     }
 
+    fn start_timer(&self) {
+        self.inner.lock().unwrap().timer.start();
+    }
+
+    fn stop_timer(&self) {
+        self.inner.lock().unwrap().timer.stop();
+    }
+
+    fn stop_timer_and_finalize(&self, fn_name: &str) {
+        let elapsed = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.timer.stop();
+            inner.timer.elapsed()
+        };
+
+        self.shared_runtime_state
+            .d_scheduler
+            .finish_local_work(fn_name, elapsed);
+    }
+
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
     where
         T: DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
+                self.stop_timer();
+
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
                         // try lineage reconstruction here
@@ -246,6 +270,9 @@ impl Runtime {
                     .d_store
                     .get_or_watch(id.clone())
                     .await;
+
+                self.start_timer();
+
                 // TODO: n lineage retries on failed wait?
                 t
             }
@@ -256,8 +283,11 @@ impl Runtime {
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> Result<(), Error> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
+                self.stop_timer();
+
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
+                        self.start_timer();
                         // Ignore failure.
                         return Ok(());
                     }
@@ -267,6 +297,9 @@ impl Runtime {
                     .d_store
                     .decrement_or_remove(id.clone(), 1)
                     .await?;
+
+                self.start_timer();
+
                 Ok(())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -276,6 +309,8 @@ impl Runtime {
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> Result<DFut<T>, Error> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
+                self.stop_timer();
+
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
                         return Err(Error::System);
@@ -283,6 +318,9 @@ impl Runtime {
                 }
 
                 self.shared_runtime_state.d_store.share(&id, 1).await?;
+
+                self.start_timer();
+
                 Ok(id.clone().into())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -292,6 +330,8 @@ impl Runtime {
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> Result<Vec<DFut<T>>, Error> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
+                self.stop_timer();
+
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
                         return Err(Error::System);
@@ -299,6 +339,9 @@ impl Runtime {
                 }
 
                 self.shared_runtime_state.d_store.share(&id, n).await?;
+
+                self.start_timer();
+
                 Ok((0..n).map(|_| id.clone().into()).collect())
             }
             InnerDFut::Error(err) => Err(err.clone()),
@@ -309,10 +352,12 @@ impl Runtime {
     where
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
+        self.stop_timer();
         let d_store_id = self.next_d_store_id();
         self.shared_runtime_state
             .d_store
             .publish(d_store_id.clone(), t)?;
+        self.start_timer();
         Ok(d_store_id.into())
     }
 }
@@ -328,7 +373,7 @@ impl Runtime {
                 .shared_runtime_state
                 .next_task_id
                 .fetch_add(1, Ordering::SeqCst),
-            _inner: Arc::default(),
+            inner: Arc::default(),
         }
     }
 
@@ -361,13 +406,11 @@ impl Runtime {
             let d_store_id = d_store_id.clone();
             let fn_name = fn_name.to_string();
             async move {
-                let start = Instant::now();
+                rt.start_timer();
 
                 let t = fut.await;
 
-                rt.shared_runtime_state
-                    .d_scheduler
-                    .finish_local_work(&fn_name, start.elapsed());
+                rt.stop_timer_and_finalize(&fn_name);
 
                 rt.shared_runtime_state
                     .d_store
@@ -400,7 +443,7 @@ impl Runtime {
     }
 
     fn track_call(&self, call: Call) {
-        self._inner.lock().unwrap().calls.push(call);
+        self.inner.lock().unwrap().calls.push(call);
     }
 
     fn next_d_store_id(&self) -> DStoreId {

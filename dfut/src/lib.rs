@@ -15,6 +15,7 @@ mod d_scheduler;
 mod d_store;
 mod global_scheduler;
 mod runtime;
+mod timer;
 mod work;
 
 pub use d_fut::DFut;
