@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -7,6 +7,7 @@ use std::sync::{
 use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tonic::transport::Server;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
     },
     d_store::{
         d_store_service::d_store_service_server::DStoreServiceServer, DStore, DStoreClient,
-        DStoreId,
+        DStoreId, ValueTrait,
     },
     global_scheduler::global_scheduler_service::{HeartBeatResponse, RegisterResponse},
     timer::Timer,
@@ -31,6 +32,7 @@ use crate::{
 #[derive(Debug)]
 struct SharedRuntimeState {
     local_server_address: String,
+    dfut_retries: usize,
 
     d_scheduler: DScheduler,
     d_store: Arc<DStore>,
@@ -70,6 +72,9 @@ impl RootRuntime {
         Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 local_server_address: local_server_address.to_string(),
+                // TODO: pass in through config
+                dfut_retries: 3,
+
                 d_scheduler,
                 d_store,
                 lifetime_list_id: AtomicU64::new(0),
@@ -191,22 +196,18 @@ impl RootRuntime {
 #[allow(unused)]
 #[derive(Debug)]
 enum Call {
-    // We don't need to be able to recover local calls they are considered to be owned by the
-    // remote owner.
-    Local {
-        fn_name: String,
-        d_store_id: DStoreId,
-    },
+    // We don't need to be able to recover local calls they are owned by the remote owner.
+    Local { fn_name: String },
     // If the remote task fails then we will recover.
-    Remote {
-        work: Work,
-        d_store_id: DStoreId,
-    },
+    Remote { work: Work },
+    Retrying { tx: Sender<Arc<dyn ValueTrait>> },
+    RetriedOk { v: Arc<dyn ValueTrait> },
+    Err,
 }
 
 #[derive(Debug, Default)]
 struct InnerRuntime {
-    calls: Vec<Call>,
+    calls: HashMap<DStoreId, Call>,
     timer: Timer,
 }
 
@@ -250,17 +251,92 @@ impl Runtime {
             .finish_local_work(fn_name, elapsed);
     }
 
+    async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> Result<T, Error>
+    where
+        T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+    {
+        enum RetryState {
+            Sender(Work, Sender<Arc<dyn ValueTrait>>),
+            Receiver(Receiver<Arc<dyn ValueTrait>>),
+        }
+
+        let r = {
+            let mut inner = self.inner.lock().unwrap();
+            let mut e = inner.calls.entry(d_store_id.clone());
+            match e {
+                Entry::Occupied(ref mut o) => match o.get() {
+                    Call::Remote { .. } => {
+                        let (tx, _rx) = channel(1);
+                        let v = o.insert(Call::Retrying { tx: tx.clone() });
+                        let work = if let Call::Remote { work } = v {
+                            work
+                        } else {
+                            unreachable!()
+                        };
+                        RetryState::Sender(work, tx)
+                    }
+                    Call::Retrying { tx } => RetryState::Receiver(tx.subscribe()),
+                    Call::RetriedOk { v } => {
+                        let t: Arc<T> = Arc::clone(&v).as_any().downcast().unwrap();
+                        return Ok((*t).clone());
+                    }
+                    Call::Local { .. } | Call::Err => return Err(Error::System),
+                },
+                Entry::Vacant(_) => unreachable!(),
+            }
+        };
+        match r {
+            RetryState::Sender(work, tx) => {
+                for _ in 0..self.shared_runtime_state.dfut_retries {
+                    let d_store_id = self
+                        .shared_runtime_state
+                        .d_scheduler
+                        .schedule(self.task_id, work.clone())
+                        .await;
+                    let t: Result<T, Error> = self
+                        .shared_runtime_state
+                        .d_store
+                        .get_or_watch(d_store_id.clone())
+                        .await;
+                    if let Ok(t) = t {
+                        let mut inner = self.inner.lock().unwrap();
+                        let v: Arc<dyn ValueTrait> = Arc::new(t.clone());
+                        inner
+                            .calls
+                            .insert(d_store_id.clone(), Call::RetriedOk { v: Arc::clone(&v) });
+                        tx.send(v).unwrap();
+
+                        return Ok(t);
+                    }
+                }
+
+                let mut inner = self.inner.lock().unwrap();
+                inner.calls.insert(d_store_id.clone(), Call::Err);
+
+                return Err(Error::System);
+            }
+            RetryState::Receiver(mut rx) => {
+                let v = match rx.recv().await {
+                    Ok(v) => v,
+                    Err(_) => return Err(Error::System),
+                };
+                let t: Arc<T> = v.as_any().downcast().unwrap();
+                return Ok((*t).clone());
+            }
+        }
+    }
+
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
     where
-        T: DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+        T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
 
-                if let Some(valid) = self.is_valid_id(id) {
+                if let Some(valid) = self.is_valid_id(&id) {
                     if !valid {
-                        // try lineage reconstruction here
+                        return self.try_retry_dfut(id).await;
                     }
                 }
 
@@ -270,9 +346,12 @@ impl Runtime {
                     .get_or_watch(id.clone())
                     .await;
 
+                if let Err(_) = &t {
+                    return self.try_retry_dfut(id).await;
+                }
+
                 self.start_timer();
 
-                // TODO: n lineage retries on failed wait?
                 t
             }
             InnerDFut::Error(err) => return Err(err.clone()),
@@ -393,10 +472,12 @@ impl Runtime {
     {
         let d_store_id = self.next_d_store_id();
 
-        self.track_call(Call::Local {
-            fn_name: fn_name.to_string(),
-            d_store_id: d_store_id.clone(),
-        });
+        self.track_call(
+            d_store_id.clone(),
+            Call::Local {
+                fn_name: fn_name.to_string(),
+            },
+        );
 
         tokio::spawn({
             // TODO: I don't like that we pass two references to the same runtime into the spawn:
@@ -441,8 +522,8 @@ impl Runtime {
         d_store_id.into()
     }
 
-    fn track_call(&self, call: Call) {
-        self.inner.lock().unwrap().calls.push(call);
+    fn track_call(&self, d_store_id: DStoreId, call: Call) {
+        self.inner.lock().unwrap().calls.insert(d_store_id, call);
     }
 
     fn next_d_store_id(&self) -> DStoreId {
@@ -465,10 +546,7 @@ impl Runtime {
             .schedule(self.task_id, work.clone())
             .await;
 
-        self.track_call(Call::Remote {
-            work,
-            d_store_id: d_store_id.clone(),
-        });
+        self.track_call(d_store_id.clone(), Call::Remote { work });
 
         d_store_id.into()
     }
@@ -498,7 +576,7 @@ impl RuntimeClient {
 
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
     where
-        T: DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+        T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id.clone()).await,

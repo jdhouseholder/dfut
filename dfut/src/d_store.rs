@@ -27,7 +27,9 @@ use d_store_service::{
     ShareNRequest, ShareNResponse,
 };
 
-trait ValueTrait: erased_serde::Serialize + std::fmt::Debug + Any + Send + Sync + 'static {
+pub(crate) trait ValueTrait:
+    erased_serde::Serialize + std::fmt::Debug + Any + Send + Sync + 'static
+{
     fn as_serialize(&self) -> &dyn erased_serde::Serialize;
     fn as_any(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync + 'static)>;
 }

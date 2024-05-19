@@ -221,7 +221,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
             pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> Result<T, dfut::Error>
             where
-                T: dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+                T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
             {
                 self.runtime.wait(t).await
             }
@@ -284,7 +284,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
             pub async fn d_await<T>(&self, d_fut: DFut<T>) -> T
             where
-                T: dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+                T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
             {
                 self.runtime.wait(d_fut).await.unwrap()
             }
