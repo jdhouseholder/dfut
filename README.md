@@ -18,3 +18,5 @@ A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries 
 * Make the global scheduler fault tolerant with the `raft` crate (https://docs.rs/raft).
 * Consider using a rayon threadpool for cpu bound tasks rather than requiring `tokio::spawn_blocking`.
 * Change address type.
+* Rename work to calldata.
+* `d_await` that returns Arc to avoid cloning + macro auto behavior when return type is `Arc<T>`.
