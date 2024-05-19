@@ -48,11 +48,22 @@ message UnRegisterResponse {
 	optional string leader_redirect = 1;
 }
 
+message RaftRequest {
+	oneof req_type {
+		string proposal = 1;
+		string msg = 2;
+	}
+}
+
+message RaftResponse {
+}
+
 service GlobalSchedulerService {
 	rpc Register(RegisterRequest) returns (RegisterResponse);
 	rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
 	rpc Schedule(ScheduleRequest) returns (ScheduleResponse);
 	rpc UnRegister(UnRegisterRequest) returns (UnRegisterResponse);
+	rpc Raft(RaftRequest) returns (RaftResponse);
 	// TODO: Rpc for cli. 
 	// rpc Status(StatusRequest) returns (StatusResponse);
 	// rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
