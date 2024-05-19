@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+
 #[derive(Debug, Default)]
 pub(crate) struct Timer {
     last_start: Option<Instant>,
