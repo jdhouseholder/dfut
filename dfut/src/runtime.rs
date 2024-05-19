@@ -4,8 +4,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use metrics::histogram;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tonic::transport::Server;
@@ -235,24 +236,22 @@ impl Runtime {
             .map(|v| d_store_id.lifetime_id >= *v)
     }
 
-    fn start_timer(&self) {
-        self.inner.lock().unwrap().timer.start();
+    fn start_timer(&self) -> Instant {
+        self.inner.lock().unwrap().timer.start()
     }
 
     fn stop_timer(&self) {
         self.inner.lock().unwrap().timer.stop();
     }
 
-    fn stop_timer_and_finalize(&self, fn_name: &str) {
-        let elapsed = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.timer.stop();
-            inner.timer.elapsed()
-        };
+    fn stop_timer_and_finalize(&self, fn_name: &str) -> Duration {
+        let elapsed = { self.inner.lock().unwrap().timer.elapsed() };
 
         self.shared_runtime_state
             .d_scheduler
             .finish_local_work(fn_name, elapsed);
+
+        elapsed
     }
 
     async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> Result<T, Error>
@@ -494,7 +493,9 @@ impl Runtime {
 
                 let t = fut.await;
 
-                rt.stop_timer_and_finalize(&fn_name);
+                let took = rt.stop_timer_and_finalize(&fn_name);
+
+                histogram!("do_local_work", "fn_name" => fn_name).record(took);
 
                 rt.shared_runtime_state
                     .d_store

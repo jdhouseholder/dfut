@@ -7,10 +7,13 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-    pub fn start(&mut self) {
-        if self.last_start.is_none() {
-            self.last_start = Some(Instant::now());
+    pub fn start(&mut self) -> Instant {
+        let now = Instant::now();
+        if let Some(i) = self.last_start {
+            self.elapsed += i.elapsed();
         }
+        self.last_start = Some(now);
+        now
     }
 
     pub fn stop(&mut self) {
@@ -19,7 +22,8 @@ impl Timer {
         }
     }
 
-    pub fn elapsed(&self) -> Duration {
+    pub fn elapsed(&mut self) -> Duration {
+        self.stop();
         self.elapsed
     }
 }

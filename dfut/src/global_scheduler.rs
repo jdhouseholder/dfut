@@ -2,6 +2,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use metrics::counter;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use tonic::{transport::Server, Request, Response, Status};
@@ -84,7 +85,10 @@ impl GlobalScheduler {
             .fn_availability
             .get(fn_name)?
             .choose(&mut rand::thread_rng())
-            .map(|s| s.clone())
+            .map(|s| {
+                counter!("schedule_fn", "choice" => s.clone()).increment(1);
+                s.clone()
+            })
             .clone()
     }
 

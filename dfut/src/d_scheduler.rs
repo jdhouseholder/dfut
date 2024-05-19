@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lru::LruCache;
+use metrics::counter;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::{
@@ -86,7 +87,10 @@ impl DScheduler {
     pub(crate) fn accept_local_work(&self, _fn_name: &str) -> bool {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
-        rand::random()
+        let f: f64 = rand::random();
+        let b = f < 0.25;
+        counter!("accept_local_work", "choice" => if b { "local" } else { "remote" }).increment(1);
+        b
     }
 
     pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration) {
