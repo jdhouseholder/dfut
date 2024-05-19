@@ -29,6 +29,8 @@ use crate::{
     Error,
 };
 
+const DFUT_RETRIES: usize = 3;
+
 #[derive(Debug)]
 struct SharedRuntimeState {
     local_server_address: String,
@@ -73,7 +75,7 @@ impl RootRuntime {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 local_server_address: local_server_address.to_string(),
                 // TODO: pass in through config
-                dfut_retries: 3,
+                dfut_retries: DFUT_RETRIES,
 
                 d_scheduler,
                 d_store,
