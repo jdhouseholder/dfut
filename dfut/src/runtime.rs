@@ -177,11 +177,11 @@ impl RootRuntime {
 
         let d_store = Arc::clone(&self.shared_runtime_state.d_store);
 
-        tokio::spawn(async move {
+        let heart_beat_fut = tokio::spawn(async move {
             self.heart_beat_forever().await;
         });
 
-        Server::builder()
+        let serve_fut = Server::builder()
             .add_service(
                 DStoreServiceServer::new(d_store)
                     .max_encoding_message_size(usize::MAX)
@@ -192,9 +192,12 @@ impl RootRuntime {
                     .max_encoding_message_size(usize::MAX)
                     .max_decoding_message_size(usize::MAX),
             )
-            .serve(address)
-            .await
-            .unwrap();
+            .serve(address);
+
+        tokio::select! {
+            r = serve_fut => r.unwrap(),
+            _ = heart_beat_fut => {},
+        }
     }
 }
 
