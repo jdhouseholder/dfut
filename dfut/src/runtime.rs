@@ -540,6 +540,11 @@ impl Runtime {
         self.shared_runtime_state.d_store.take_next_id(self.task_id)
     }
 
+    // TODO: it is possible that the global scheduler routes the work back to
+    // the worker requesting remote scheduling. We want to avoid a self to self network
+    // transmission.
+    //
+    //
     // TODO: just generate this for each fn, that way we don't have to use Work
     // for local computation. We only use it for remote computation.
     //
