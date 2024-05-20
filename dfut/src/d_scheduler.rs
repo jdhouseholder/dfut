@@ -22,14 +22,16 @@ pub(crate) mod worker_service {
 
 use worker_service::{worker_service_client::WorkerServiceClient, DoWorkResponse};
 
+const STAY_LOCAL_THRESHOLD: usize = 2 << 32; // 1GiB
+
 #[derive(Debug, Default, Clone)]
 struct FnStats {
-    dur: Vec<Duration>,
+    v: Vec<(Duration, usize)>,
 }
 
 impl FnStats {
-    fn track(&mut self, dur: std::time::Duration) {
-        self.dur.push(dur);
+    fn track(&mut self, dur: std::time::Duration, ret_size: usize) {
+        self.v.push((dur, ret_size));
     }
 }
 
@@ -41,6 +43,9 @@ struct Stats {
 #[derive(Debug)]
 pub(crate) struct DScheduler {
     d_scheduler_client: DSchedulerClient,
+    // TODO: When it is fun performance time we move this out of a mutex and
+    // use a lock free data structure. We don't have any benchmarks/analysis to
+    // justify not using this mutex so we'll do the simple thing first.
     stats: Mutex<Stats>,
 }
 
@@ -84,23 +89,32 @@ impl DScheduler {
             .into_inner())
     }
 
-    pub(crate) fn accept_local_work(&self, _fn_name: &str) -> bool {
+    pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
         let f: f64 = rand::random();
-        let b = f < 0.25;
-        counter!("accept_local_work", "choice" => if b { "local" } else { "remote" }).increment(1);
+        let b = if arg_size >= STAY_LOCAL_THRESHOLD {
+            f < 0.8
+        } else {
+            f < 0.5
+        };
+        counter!(
+            "accept_local_work",
+             "fn_name" => fn_name.to_string(),
+             "choice" => if b { "local" } else { "remote" },
+        )
+        .increment(1);
         b
     }
 
-    pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration) {
+    pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {
         let mut stats = self.stats.lock().unwrap();
 
         stats
             .fn_stats
             .entry(fn_name.to_string())
             .or_default()
-            .track(took);
+            .track(took, ret_size);
     }
 
     pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {

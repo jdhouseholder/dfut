@@ -247,12 +247,12 @@ impl Runtime {
         self.inner.lock().unwrap().timer.stop();
     }
 
-    fn stop_timer_and_finalize(&self, fn_name: &str) -> Duration {
+    fn finish_local_work(&self, fn_name: &str, ret_size: usize) -> Duration {
         let elapsed = { self.inner.lock().unwrap().timer.elapsed() };
 
         self.shared_runtime_state
             .d_scheduler
-            .finish_local_work(fn_name, elapsed);
+            .finish_local_work(fn_name, elapsed, ret_size);
 
         elapsed
     }
@@ -461,10 +461,10 @@ impl Runtime {
         }
     }
 
-    pub fn accept_local_work(&self, fn_name: &str, _arg_size: usize) -> bool {
+    pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
         self.shared_runtime_state
             .d_scheduler
-            .accept_local_work(fn_name)
+            .accept_local_work(fn_name, arg_size)
     }
 
     // Can we use https://docs.rs/tokio-metrics/0.3.1/tokio_metrics/ to make decisions?
@@ -496,11 +496,11 @@ impl Runtime {
 
                 let t = fut.await;
 
-                let took = rt.stop_timer_and_finalize(&fn_name);
-                histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
+                let size = size_ser::to_size(&t).unwrap();
+                let took = rt.finish_local_work(&fn_name, size);
 
-                let size = size_ser::to_size(&t).unwrap() as f64;
-                histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size);
+                histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
+                histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
 
                 rt.shared_runtime_state
                     .d_store
