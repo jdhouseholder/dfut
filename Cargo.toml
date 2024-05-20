@@ -3,5 +3,4 @@ resolver = "2"
 members = [
 	"dfut",
 	"dfut-macro",
-	"size-ser",
 ]

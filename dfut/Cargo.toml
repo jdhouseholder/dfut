@@ -13,6 +13,7 @@ metrics = "0.22.3"
 lru = "0.12.3"
 erased-serde = "0.4.5"
 raft = "0.7.0"
+size-ser = "0.1.0"
 
 tonic = "0.11.0"
 prost = "0.12.4"
@@ -20,7 +21,6 @@ tower-service = "0.3.2"
 http = "0.2.11"
 
 dfut-macro = { path = "../dfut-macro" }
-size-ser = { path = "../size-ser" }
 
 [build-dependencies]
 tonic-build = "0.11"
