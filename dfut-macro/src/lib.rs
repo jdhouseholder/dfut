@@ -60,6 +60,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 let mut fn_arg_idents = Vec::new();
+                let mut fn_arg_size = Vec::new();
 
                 let mut named = Punctuated::new();
                 for input in inputs.clone() {
@@ -72,6 +73,9 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                             };
 
                             fn_arg_idents.push(ident.clone());
+                            fn_arg_size.push(quote! {
+                                dfut::size_ser::to_size(&#ident).unwrap()
+                            });
 
                             // TODO: Construct type for each?
                             named.push(syn::Field {
@@ -129,7 +133,9 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                     pub async fn #name(#immutable_inputs) -> #d_fut_output {
                         let fn_name = stringify!(#name);
 
-                        if self.runtime.accept_local_work(fn_name) {
+                        let size = #(#fn_arg_size)+*;
+
+                        if self.runtime.accept_local_work(fn_name, size) {
                             self.runtime.do_local_work_fut(
                                 fn_name,
                                 {

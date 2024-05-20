@@ -32,6 +32,7 @@ pub use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub use bincode;
 pub use serde;
+pub use size_ser;
 pub use tonic;
 
 extern crate dfut_macro;

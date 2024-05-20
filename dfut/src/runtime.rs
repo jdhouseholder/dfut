@@ -461,7 +461,7 @@ impl Runtime {
         }
     }
 
-    pub fn accept_local_work(&self, fn_name: &str) -> bool {
+    pub fn accept_local_work(&self, fn_name: &str, _arg_size: usize) -> bool {
         self.shared_runtime_state
             .d_scheduler
             .accept_local_work(fn_name)
