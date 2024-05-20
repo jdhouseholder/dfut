@@ -210,7 +210,7 @@ enum Call {
     Remote { work: Work },
     Retrying { tx: Sender<Arc<dyn ValueTrait>> },
     RetriedOk { v: Arc<dyn ValueTrait> },
-    Err,
+    RetriedErr,
 }
 
 #[derive(Debug, Default)]
@@ -286,7 +286,7 @@ impl Runtime {
                         let t: Arc<T> = Arc::clone(&v).as_any().downcast().unwrap();
                         return Ok((*t).clone());
                     }
-                    Call::Local { .. } | Call::Err => return Err(Error::System),
+                    Call::Local { .. } | Call::RetriedErr => return Err(Error::System),
                 },
                 Entry::Vacant(_) => unreachable!(),
             }
@@ -317,7 +317,7 @@ impl Runtime {
                 }
 
                 let mut inner = self.inner.lock().unwrap();
-                inner.calls.insert(d_store_id.clone(), Call::Err);
+                inner.calls.insert(d_store_id.clone(), Call::RetriedErr);
 
                 return Err(Error::System);
             }
