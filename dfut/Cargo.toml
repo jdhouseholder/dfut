@@ -20,6 +20,7 @@ tower-service = "0.3.2"
 http = "0.2.11"
 
 dfut-macro = { path = "../dfut-macro" }
+size-ser = { path = "../size-ser" }
 
 [build-dependencies]
 tonic-build = "0.11"

@@ -497,8 +497,10 @@ impl Runtime {
                 let t = fut.await;
 
                 let took = rt.stop_timer_and_finalize(&fn_name);
+                histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
 
-                histogram!("do_local_work", "fn_name" => fn_name).record(took);
+                let size = size_ser::to_size(&t).unwrap() as f64;
+                histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size);
 
                 rt.shared_runtime_state
                     .d_store
