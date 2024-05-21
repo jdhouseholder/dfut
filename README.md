@@ -20,3 +20,5 @@ A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries 
 * Change address type.
 * Rename work to calldata.
 * `d_await` that returns Arc to avoid cloning + macro auto behavior when return type is `Arc<T>`.
+* Extract (via a trait + derive macro) the address of all of the dfuts from args to each `d_fn` and use this info to schedule. We can't do this with serde right now due to the lack of specialization in rust.
+* Support args in dstore?
