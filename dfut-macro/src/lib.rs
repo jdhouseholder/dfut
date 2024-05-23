@@ -138,11 +138,8 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                         if self.runtime.accept_local_work(fn_name, size) {
                             self.runtime.do_local_work_fut(
                                 fn_name,
-                                {
-                                    let r = self.runtime.new_child();
-                                    async move {
-                                        #worker_ty::new(r).#fn_impl_name(#(#fn_arg_idents),*).await
-                                    }
+                                |r| async move {
+                                    #worker_ty::new(r).#fn_impl_name(#(#fn_arg_idents),*).await
                                 }
                             )
                         } else {
@@ -177,11 +174,11 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                     #work_enum_ident::#work_variant_ident {
                         #(#fn_arg_idents),*
                     } => {
-                        let runtime = self.root_runtime.new_child(task_id);
                         let fn_name = stringify!(#name);
-                        runtime.clone().do_local_work_dwr(
+                        self.root_runtime.do_local_work(
                             fn_name,
-                            async move {
+                            task_id,
+                            |runtime| async move {
                                 #worker_ty::new(runtime)
                                     .#fn_impl_name(#(#fn_arg_idents),*)
                                     .await

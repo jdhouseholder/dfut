@@ -91,7 +91,7 @@ impl RootRuntime {
         }
     }
 
-    pub fn new_child(&self, remote_parent_task_id: u64) -> Runtime {
+    fn new_child(&self, remote_parent_task_id: u64) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
@@ -103,6 +103,23 @@ impl RootRuntime {
                 .fetch_add(1, Ordering::SeqCst),
             inner: Arc::default(),
         }
+    }
+
+    pub fn do_local_work<F, T, FutFn>(
+        &self,
+        fn_name: &str,
+        task_id: u64,
+        f: FutFn,
+    ) -> DoWorkResponse
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
+        FutFn: FnOnce(Runtime) -> F,
+    {
+        let runtime = self.new_child(task_id);
+        let fut = f(runtime.clone());
+        let d_store_id = runtime.do_local_work(fn_name, fut);
+        d_store_id.into()
     }
 
     async fn heart_beat_forever(&self) {
@@ -444,7 +461,7 @@ impl Runtime {
 }
 
 impl Runtime {
-    pub fn new_child(&self) -> Runtime {
+    fn new_child(&self) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
@@ -458,6 +475,8 @@ impl Runtime {
         }
     }
 
+    // TODO: schedule_work(fn_name, arg_size) -> Where
+    // Where is enum either local or remote with address.
     pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
         self.shared_runtime_state
             .d_scheduler
@@ -509,23 +528,15 @@ impl Runtime {
         d_store_id
     }
 
-    pub fn do_local_work_dwr<F, T>(&self, fn_name: &str, fut: F) -> DoWorkResponse
+    pub fn do_local_work_fut<F, T, FutFn>(&self, fn_name: &str, f: FutFn) -> DFut<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
+        FutFn: FnOnce(Runtime) -> F,
     {
+        let r = self.new_child();
+        let fut = f(r);
         let d_store_id = self.do_local_work(fn_name, fut);
-
-        d_store_id.into()
-    }
-
-    pub fn do_local_work_fut<F, T>(&self, fn_name: &str, fut: F) -> DFut<T>
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Serialize + std::fmt::Debug + Send + Sync + 'static,
-    {
-        let d_store_id = self.do_local_work(fn_name, fut);
-
         d_store_id.into()
     }
 
