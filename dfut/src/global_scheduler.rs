@@ -14,7 +14,7 @@ pub(crate) mod global_scheduler_service {
 
 use global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    HeartBeatRequest, HeartBeatResponse, Lifetime, RaftRequest, RaftResponse, RegisterRequest,
+    HeartBeatRequest, HeartBeatResponse, RaftRequest, RaftResponse, RegisterRequest,
     RegisterResponse, ScheduleRequest, ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
 };
 
@@ -182,6 +182,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             address,
             lifetime_id,
             lifetime_list_id,
+            ..
         } = request.into_inner();
 
         let mut inner = self.inner.lock().unwrap();
@@ -191,7 +192,8 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 leader_redirect: None,
                 lifetime_id,
                 lifetime_list_id: inner.lifetimes.list_id,
-                lifetimes: Vec::new(),
+                lifetimes: HashMap::new(),
+                stats: HashMap::new(),
             }));
         }
 
@@ -238,14 +240,11 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         };
 
         let lifetime_list_id = inner.lifetimes.list_id;
-        let lifetimes = inner
+        let lifetimes: HashMap<_, _> = inner
             .lifetimes
             .m
             .iter()
-            .map(|(address, lifetime_lease)| Lifetime {
-                address: address.to_string(),
-                lifetime_id: lifetime_lease.id,
-            })
+            .map(|(address, lifetime_lease)| (address.to_string(), lifetime_lease.id))
             .collect();
 
         Ok(Response::new(HeartBeatResponse {
@@ -253,6 +252,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             lifetime_id,
             lifetime_list_id,
             lifetimes,
+            stats: HashMap::new(),
         }))
     }
 

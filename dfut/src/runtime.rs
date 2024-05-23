@@ -134,10 +134,7 @@ impl RootRuntime {
                 .unwrap();
 
             if lifetime_list_id > local_lifetime_list_id {
-                *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes
-                    .into_iter()
-                    .map(|l| (l.address, l.lifetime_id))
-                    .collect();
+                *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes;
             }
 
             if lifetime_id != local_lifetime_id {

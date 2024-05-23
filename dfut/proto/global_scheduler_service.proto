@@ -12,23 +12,27 @@ message RegisterResponse {
 	fixed64 heart_beat_timeout = 3;
 }
 
+message Stats {
+}
+
 message HeartBeatRequest {
 	string address = 1;
 	fixed64 lifetime_id = 2;
 	fixed64 lifetime_list_id = 3;
-}
-
-// Lifetime of each peer. We'll use this to know when a peer has failed.
-message Lifetime {
-	string address = 1;
-	fixed64 lifetime_id = 2;
+	Stats stats = 4;
 }
 
 message HeartBeatResponse {
 	optional string leader_redirect = 1;
 	fixed64 lifetime_id = 2;
+
 	fixed64 lifetime_list_id = 3;
-	repeated Lifetime lifetimes = 4;
+	// address -> lifetime_id
+	map<string, fixed64> lifetimes = 4;
+
+	// TODO: Convert this to a delta to reduce waste.
+	// address -> Stats
+	map<string, Stats> stats = 5;
 }
 
 message ScheduleRequest {

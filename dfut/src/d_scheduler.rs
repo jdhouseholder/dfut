@@ -84,6 +84,7 @@ impl DScheduler {
                 address: address.to_string(),
                 lifetime_id,
                 lifetime_list_id,
+                stats: None,
             })
             .await?
             .into_inner())
