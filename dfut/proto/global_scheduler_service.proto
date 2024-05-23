@@ -12,7 +12,30 @@ message RegisterResponse {
 	fixed64 heart_beat_timeout = 3;
 }
 
+message Latency {
+	float p50 = 1;
+	float p99 = 2;
+	float p99_9 = 3;
+}
+
+message FnStats {
+	fixed64 completed = 1;
+	fixed64 pending = 2;
+
+	Latency latency = 3;
+	fixed64 avg_call = 4;
+	fixed64 avg_ret = 5;
+}
+
 message Stats {
+	fixed64 completed = 1;
+	fixed64 pending = 2;
+
+	Latency latency = 3;
+	fixed64 avg_call = 4;
+	fixed64 avg_ret = 5;
+
+	map<string, FnStats> fn_stats = 6;
 }
 
 message HeartBeatRequest {
