@@ -66,6 +66,7 @@ impl Into<DoWorkResponse> for DStoreId {
     }
 }
 
+// TODO: Should we store errors in the d store?
 #[derive(Debug)]
 enum Entry {
     Watch {

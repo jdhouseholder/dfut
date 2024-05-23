@@ -14,7 +14,7 @@ pub(crate) mod global_scheduler_service {
 
 use global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    HeartBeatRequest, HeartBeatResponse, RaftRequest, RaftResponse, RegisterRequest,
+    HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse, RegisterRequest,
     RegisterResponse, ScheduleRequest, ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
 };
 
@@ -281,8 +281,11 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         Ok(Response::new(UnRegisterResponse::default()))
     }
 
-    async fn raft(&self, request: Request<RaftRequest>) -> Result<Response<RaftResponse>, Status> {
+    async fn raft_step(
+        &self,
+        request: Request<RaftStepRequest>,
+    ) -> Result<Response<RaftStepResponse>, Status> {
         let _ = request.into_inner();
-        Ok(Response::new(RaftResponse::default()))
+        Ok(Response::new(RaftStepResponse::default()))
     }
 }

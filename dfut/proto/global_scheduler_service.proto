@@ -75,14 +75,14 @@ message UnRegisterResponse {
 	optional string leader_redirect = 1;
 }
 
-message RaftRequest {
+message RaftStepRequest {
 	oneof req_type {
 		string proposal = 1;
 		string msg = 2;
 	}
 }
 
-message RaftResponse {
+message RaftStepResponse {
 }
 
 service GlobalSchedulerService {
@@ -90,5 +90,5 @@ service GlobalSchedulerService {
 	rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
 	rpc Schedule(ScheduleRequest) returns (ScheduleResponse);
 	rpc UnRegister(UnRegisterRequest) returns (UnRegisterResponse);
-	rpc Raft(RaftRequest) returns (RaftResponse);
+	rpc RaftStep(RaftStepRequest) returns (RaftStepResponse);
 }
