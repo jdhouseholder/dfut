@@ -86,7 +86,8 @@ impl GlobalScheduler {
             .get(fn_name)?
             .choose(&mut rand::thread_rng())
             .map(|s| {
-                counter!("schedule_fn", "choice" => s.clone()).increment(1);
+                counter!("schedule_fn", "fn_name" => fn_name.to_string(), "choice" => s.clone())
+                    .increment(1);
                 s.clone()
             })
             .clone()

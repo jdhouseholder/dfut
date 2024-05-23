@@ -22,7 +22,7 @@ pub(crate) mod worker_service {
 
 use worker_service::{worker_service_client::WorkerServiceClient, DoWorkResponse};
 
-const STAY_LOCAL_THRESHOLD: usize = 2 << 32; // 1GiB
+const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
 
 #[derive(Debug, Default, Clone)]
 struct FnStats {
@@ -92,19 +92,50 @@ impl DScheduler {
     pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
-        let f: f64 = rand::random();
-        let b = if arg_size >= STAY_LOCAL_THRESHOLD {
-            f < 0.8
-        } else {
-            f < 0.5
+        let last_stats = {
+            self.stats
+                .lock()
+                .unwrap()
+                .fn_stats
+                .get(fn_name)
+                .map(|s| {
+                    s.v.last()
+                        .map(|(duration, ret_size)| (duration.as_secs_f64(), *ret_size))
+                })
+                .flatten()
         };
+
+        // 1. Increase local probability if large args or ret.
+        // 2. Decrease local probability if the historical duration is large.
+        let p = if let Some((duration, ret_size)) = last_stats {
+            let s = if arg_size + ret_size >= STAY_LOCAL_THRESHOLD {
+                0.8
+            } else {
+                0.5
+            };
+            let d = if duration > 1. {
+                1. / (2. + duration)
+            } else {
+                0.
+            };
+            s - d
+        } else {
+            if arg_size >= STAY_LOCAL_THRESHOLD {
+                0.8
+            } else {
+                0.5
+            }
+        };
+
+        let f: f64 = rand::random();
+        let local = f < p;
         counter!(
             "accept_local_work",
              "fn_name" => fn_name.to_string(),
-             "choice" => if b { "local" } else { "remote" },
+             "choice" => if local { "local" } else { "remote" },
         )
         .increment(1);
-        b
+        local
     }
 
     pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {
