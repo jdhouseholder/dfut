@@ -18,7 +18,4 @@ message DoWorkResponse {
 
 service WorkerService {
 	rpc DoWork(DoWorkRequest) returns (DoWorkResponse);
-	// TODO: Rpc for cli. 
-	// rpc Status(StatusRequest) returns (StatusResponse);
-	// rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }

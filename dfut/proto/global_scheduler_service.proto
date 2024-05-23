@@ -91,7 +91,4 @@ service GlobalSchedulerService {
 	rpc Schedule(ScheduleRequest) returns (ScheduleResponse);
 	rpc UnRegister(UnRegisterRequest) returns (UnRegisterResponse);
 	rpc Raft(RaftRequest) returns (RaftResponse);
-	// TODO: Rpc for cli. 
-	// rpc Status(StatusRequest) returns (StatusResponse);
-	// rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
