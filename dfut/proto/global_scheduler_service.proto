@@ -38,11 +38,18 @@ message Stats {
 	map<string, FnStats> fn_stats = 6;
 }
 
+message FailedTask {
+	string address = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 task_id = 3;
+}
+
 message HeartBeatRequest {
 	string address = 1;
 	fixed64 lifetime_id = 2;
 	fixed64 lifetime_list_id = 3;
 	Stats stats = 4;
+	repeated fixed64 failed_task_ids = 5;
 }
 
 message HeartBeatResponse {
@@ -56,6 +63,8 @@ message HeartBeatResponse {
 	// TODO: Convert this to a delta to reduce waste.
 	// address -> Stats
 	map<string, Stats> stats = 5;
+
+	repeated FailedTask failed_tasks = 6;
 }
 
 message ScheduleRequest {

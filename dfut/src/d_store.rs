@@ -90,6 +90,10 @@ struct LocalStore {
 // is the local store simple iff we require an extra call to decrement ref?
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
+    fn reserve(&self, key: DStoreId) {
+        todo!("insert watch with 0 refs. this should be the only way to generate a watch.");
+    }
+
     fn insert<T>(&self, key: DStoreId, t: T)
     where
         T: ValueTrait,
@@ -125,6 +129,10 @@ impl LocalStore {
                 ref_count: new_ref_count,
             },
         );
+    }
+
+    fn error(&self, key: DStoreId) {
+        todo!("Remove entry if present or insert tombstone to prevent future publish");
     }
 
     async fn get_or_watch(&self, key: DStoreId) -> Option<Arc<dyn ValueTrait>> {

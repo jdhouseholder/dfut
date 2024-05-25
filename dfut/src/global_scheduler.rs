@@ -194,6 +194,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 lifetime_list_id: inner.lifetimes.list_id,
                 lifetimes: HashMap::new(),
                 stats: HashMap::new(),
+                failed_tasks: Vec::new(),
             }));
         }
 
@@ -253,6 +254,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             lifetime_list_id,
             lifetimes,
             stats: HashMap::new(),
+            failed_tasks: Vec::new(),
         }))
     }
 
