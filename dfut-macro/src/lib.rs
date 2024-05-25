@@ -135,17 +135,20 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
                         let size = #(#fn_arg_size)+*;
 
-                        if self.runtime.accept_local_work(fn_name, size) {
-                            self.runtime.do_local_work_fut(
-                                fn_name,
-                                |r| async move {
-                                    #worker_ty::new(r).#fn_impl_name(#(#fn_arg_idents),*).await
-                                }
-                            )
-                        } else {
-                            self.runtime.do_remote_work(#work_enum_ident::#work_variant_ident {
-                                #(#fn_arg_idents),*
-                            }).await
+                        match self.runtime.schedule_work(fn_name, size) {
+                            dfut::Where::Local => {
+                                self.runtime.do_local_work_fut(
+                                    fn_name,
+                                    |r| async move {
+                                        #worker_ty::new(r).#fn_impl_name(#(#fn_arg_idents),*).await
+                                    }
+                                )
+                            },
+                            dfut::Where::Remote { .. } => {
+                                self.runtime.do_remote_work(#work_enum_ident::#work_variant_ident {
+                                    #(#fn_arg_idents),*
+                                }).await
+                            }
                         }
                     }
                 });
@@ -176,8 +179,10 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                     } => {
                         let fn_name = stringify!(#name);
                         self.root_runtime.do_local_work(
+                            &parent_address,
+                            parent_lifetime_id,
+                            parent_task_id,
                             fn_name,
-                            task_id,
                             |runtime| async move {
                                 #worker_ty::new(runtime)
                                     .#fn_impl_name(#(#fn_arg_idents),*)
@@ -336,7 +341,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 &self,
                 request: dfut::tonic::Request<dfut::DoWorkRequest>,
             ) -> Result<dfut::tonic::Response<dfut::DoWorkResponse>, dfut::tonic::Status> {
-                let dfut::DoWorkRequest { task_id, fn_name, args } = request.into_inner();
+                let dfut::DoWorkRequest { parent_address, parent_lifetime_id, parent_task_id, fn_name, args, .. } = request.into_inner();
 
                 let args: #work_enum_ident = dfut::bincode::deserialize(&args).unwrap();
                 let resp = match args {
@@ -344,6 +349,14 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 Ok(dfut::tonic::Response::new(resp))
+            }
+
+            async fn cascade_fail(
+                &self,
+                request: dfut::tonic::Request<dfut::CascadeFailRequest>,
+            ) -> Result<dfut::tonic::Response<dfut::CascadeFailResponse>, dfut::tonic::Status> {
+                let dfut::CascadeFailRequest { .. } = request.into_inner();
+                Ok(dfut::tonic::Response::new(dfut::CascadeFailResponse {}))
             }
         }
     };

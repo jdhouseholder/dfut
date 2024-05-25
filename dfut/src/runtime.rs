@@ -91,12 +91,21 @@ impl RootRuntime {
         }
     }
 
-    fn new_child(&self, remote_parent_task_id: u64) -> Runtime {
+    fn new_child(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        parent_task_id: u64,
+    ) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
             lifetime_id: self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst),
-            _parent_task_id: remote_parent_task_id,
+            parent_info: Arc::new(ParentInfo {
+                address: parent_address.to_string(),
+                lifetime_id: parent_lifetime_id,
+                task_id: parent_task_id,
+            }),
             task_id: self
                 .shared_runtime_state
                 .next_task_id
@@ -107,8 +116,10 @@ impl RootRuntime {
 
     pub fn do_local_work<F, T, FutFn>(
         &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        parent_task_id: u64,
         fn_name: &str,
-        task_id: u64,
         f: FutFn,
     ) -> DoWorkResponse
     where
@@ -116,7 +127,7 @@ impl RootRuntime {
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
-        let runtime = self.new_child(task_id);
+        let runtime = self.new_child(parent_address, parent_lifetime_id, parent_task_id);
         let fut = f(runtime.clone());
         let d_store_id = runtime.do_local_work(fn_name, fut);
         d_store_id.into()
@@ -234,11 +245,23 @@ struct InnerRuntime {
 }
 
 #[derive(Debug, Clone)]
+struct ParentInfo {
+    address: String,
+    lifetime_id: u64,
+    task_id: u64,
+}
+
+pub enum Where {
+    Remote { address: String },
+    Local,
+}
+
+#[derive(Debug, Clone)]
 pub struct Runtime {
     shared_runtime_state: Arc<SharedRuntimeState>,
 
     lifetime_id: u64,
-    _parent_task_id: u64,
+    parent_info: Arc<ParentInfo>,
     task_id: u64,
     inner: Arc<Mutex<InnerRuntime>>,
 }
@@ -466,7 +489,7 @@ impl Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
             lifetime_id: self.lifetime_id,
-            _parent_task_id: self.task_id,
+            parent_info: Arc::clone(&self.parent_info),
             task_id: self
                 .shared_runtime_state
                 .next_task_id
@@ -475,12 +498,18 @@ impl Runtime {
         }
     }
 
-    // TODO: schedule_work(fn_name, arg_size) -> Where
-    // Where is enum either local or remote with address.
-    pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
-        self.shared_runtime_state
+    pub fn schedule_work(&self, fn_name: &str, arg_size: usize) -> Where {
+        let local = self
+            .shared_runtime_state
             .d_scheduler
-            .accept_local_work(fn_name, arg_size)
+            .accept_local_work(fn_name, arg_size);
+        if local {
+            Where::Local
+        } else {
+            Where::Remote {
+                address: "TODO: decide peer here.".to_string(),
+            }
+        }
     }
 
     // Can we use https://docs.rs/tokio-metrics/0.3.1/tokio_metrics/ to make decisions?
@@ -518,6 +547,7 @@ impl Runtime {
                 histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
                 histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
 
+                // TODO: pass owner info to d_store to allow for tombstone propagation.
                 rt.shared_runtime_state
                     .d_store
                     .publish(d_store_id, t)
@@ -563,6 +593,7 @@ impl Runtime {
     {
         let work = iw.into_work();
 
+        // TODO: make sure this has the current runtime and track the ownership.
         let d_store_id = self
             .shared_runtime_state
             .d_scheduler
@@ -575,6 +606,8 @@ impl Runtime {
     }
 }
 
+// TODO: Runtime clients need to heartbeat with the global scheduler.
+// They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
 pub struct RuntimeClient {
     d_scheduler_client: DSchedulerClient,
     d_store_client: DStoreClient,

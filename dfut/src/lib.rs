@@ -22,10 +22,10 @@ pub use d_fut::DFut;
 pub use d_scheduler::worker_service::{
     worker_service_client::WorkerServiceClient,
     worker_service_server::{WorkerService, WorkerServiceServer},
-    DoWorkRequest, DoWorkResponse,
+    CascadeFailRequest, CascadeFailResponse, DoWorkRequest, DoWorkResponse,
 };
 pub use global_scheduler::GlobalScheduler;
-pub use runtime::{RootRuntime, Runtime, RuntimeClient};
+pub use runtime::{RootRuntime, Runtime, RuntimeClient, Where};
 pub use work::{IntoWork, Work};
 
 pub use serde::{de::DeserializeOwned, Deserialize, Serialize};

@@ -1,12 +1,13 @@
 syntax = "proto3";
 package worker_service;
 
-import "d_store_service.proto";
-
 message DoWorkRequest {
-	fixed64 task_id = 1;
-	string fn_name = 2;
-	bytes args = 3;
+	string parent_address = 1;
+	fixed64 parent_lifetime_id = 2;
+	fixed64 parent_task_id = 3;
+
+	string fn_name = 4;
+	bytes args = 5;
 }
 
 message DoWorkResponse {
@@ -16,6 +17,16 @@ message DoWorkResponse {
 	fixed64 object_id = 4;
 }
 
+message CascadeFailRequest {
+	string address = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 task_id = 3;
+}
+
+message CascadeFailResponse {
+}
+
 service WorkerService {
 	rpc DoWork(DoWorkRequest) returns (DoWorkResponse);
+	rpc CascadeFail(CascadeFailRequest) returns (CascadeFailResponse);
 }

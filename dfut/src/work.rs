@@ -22,9 +22,11 @@ impl<'a> Into<ScheduleRequest> for &'a Work {
 }
 
 impl Work {
-    pub fn into_do_work_request(self, task_id: u64) -> DoWorkRequest {
+    pub fn into_do_work_request(self, parent_task_id: u64) -> DoWorkRequest {
         DoWorkRequest {
-            task_id,
+            parent_address: "TODO".to_string(),
+            parent_lifetime_id: 1,
+            parent_task_id,
             fn_name: self.fn_name,
             args: self.args,
         }
