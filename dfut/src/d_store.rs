@@ -91,10 +91,19 @@ struct LocalStore {
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
     fn reserve(&self, key: DStoreId) {
-        todo!("insert watch with 0 refs. this should be the only way to generate a watch.");
+        let (tx, _) = broadcast::channel(1);
+        let mut blob_store = self.blob_store.lock().unwrap();
+        blob_store.insert(
+            key,
+            Entry::Watch {
+                tx,
+                subscribers: 0,
+                ref_count: 1,
+            },
+        );
     }
 
-    fn insert<T>(&self, key: DStoreId, t: T)
+    fn insert<T>(&self, key: DStoreId, t: T) -> Result<(), Error>
     where
         T: ValueTrait,
     {
@@ -104,24 +113,34 @@ impl LocalStore {
 
         let mut m = self.blob_store.lock().unwrap();
 
-        let mut new_ref_count = 1;
-        if let Some(Entry::Watch {
-            tx,
-            subscribers,
-            ref_count,
-        }) = m.remove(&key)
-        {
-            // subscribers must be less than or equal to ref_count.
-            if subscribers == ref_count {
-                // All refs are currently subscribed. We can't have any new gets or shares.
-                tx.send(Some(t)).unwrap();
-                return;
-            } else {
+        let new_ref_count;
+        match m.entry(key.clone()) {
+            HashMapEntry::Occupied(o) => {
+                let (tx, subscribers, ref_count) = match o.remove() {
+                    Entry::Watch {
+                        tx,
+                        subscribers,
+                        ref_count,
+                    } => (tx, subscribers, ref_count),
+                    _ => return Err(Error::System),
+                };
+                // subscribers must be less than or equal to ref_count.
+                if subscribers > 0 && subscribers == ref_count {
+                    // All refs are currently subscribed. We can't have any new gets or shares.
+                    tx.send(Some(t)).unwrap();
+                    return Ok(());
+                }
                 // There are still outstanding refs, we need to store.
-                tx.send(Some(Arc::clone(&t))).unwrap();
+                if subscribers > 0 {
+                    tx.send(Some(Arc::clone(&t))).unwrap();
+                }
                 new_ref_count = ref_count - subscribers;
             }
+            HashMapEntry::Vacant(_) => {
+                return Err(Error::System);
+            }
         }
+
         m.insert(
             key,
             Entry::Here {
@@ -129,27 +148,17 @@ impl LocalStore {
                 ref_count: new_ref_count,
             },
         );
+
+        Ok(())
     }
 
-    fn error(&self, key: DStoreId) {
-        todo!("Remove entry if present or insert tombstone to prevent future publish");
-    }
-
-    async fn get_or_watch(&self, key: DStoreId) -> Option<Arc<dyn ValueTrait>> {
+    async fn get_or_watch(&self, key: DStoreId) -> Result<Arc<dyn ValueTrait>, Error> {
         counter!("local_store::get_or_watch").increment(1);
 
         let mut rx = {
             let mut m = self.blob_store.lock().unwrap();
             let rx = match m.entry(key) {
-                HashMapEntry::Vacant(v) => {
-                    let (tx, rx) = broadcast::channel(1);
-                    v.insert(Entry::Watch {
-                        tx,
-                        subscribers: 0,
-                        ref_count: 1,
-                    });
-                    rx
-                }
+                HashMapEntry::Vacant(_) => return Err(Error::System),
                 HashMapEntry::Occupied(mut o) => {
                     let mut remove = false;
                     match o.get_mut() {
@@ -161,13 +170,13 @@ impl LocalStore {
                             if *ref_count == 0 {
                                 remove = true;
                             } else {
-                                return Some(Arc::clone(&t));
+                                return Ok(Arc::clone(&t));
                             }
                         }
                     }
                     if remove {
                         match o.remove() {
-                            Entry::Here { t, .. } => return Some(t),
+                            Entry::Here { t, .. } => return Ok(t),
                             _ => panic!(),
                         }
                     }
@@ -181,7 +190,7 @@ impl LocalStore {
             rx
         };
 
-        rx.recv().await.unwrap()
+        rx.recv().await.unwrap().ok_or(Error::System)
     }
 
     async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
@@ -257,20 +266,21 @@ impl DStore {
     }
 
     pub(crate) fn take_next_id(&self, task_id: u64) -> DStoreId {
-        DStoreId {
+        let key = DStoreId {
             address: self.current_address.clone(),
             lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
             task_id,
             object_id: self.next_object_id.fetch_add(1, Ordering::SeqCst),
-        }
+        };
+        self.local_store.reserve(key.clone());
+        key
     }
 
     pub(crate) fn publish<T>(&self, key: DStoreId, t: T) -> Result<(), Error>
     where
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
-        self.local_store.insert(key, t);
-        Ok(())
+        self.local_store.insert(key, t)
     }
 
     pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
@@ -284,8 +294,7 @@ impl DStore {
             let t: Arc<T> = self
                 .local_store
                 .get_or_watch(key.clone())
-                .await
-                .ok_or(Error::System)?
+                .await?
                 .as_any()
                 .downcast()
                 .unwrap();
@@ -311,6 +320,14 @@ impl DStore {
         self.local_store.decrement_or_remove(&key, by).await;
 
         Ok(())
+    }
+
+    pub(crate) fn worker_failure(&self, _address: &str, _lifetime_id: u64) {
+        todo!()
+    }
+
+    pub(crate) fn task_failure(&self, _address: &str, _lifetime_id: u64, _task_id: u64) {
+        todo!()
     }
 
     pub(crate) fn clear(&self) {
@@ -394,7 +411,10 @@ impl DStoreClient {
                 object_id: key.object_id,
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                tracing::error!("{e:?}");
+                Error::System
+            })?
             .into_inner();
 
         let t: T = bincode::deserialize(&object).unwrap();
@@ -464,7 +484,7 @@ impl DStoreService for Arc<DStore> {
             .local_store
             .get_or_watch(id.clone())
             .await
-            .ok_or_else(|| Status::not_found("DFut canceled."))?;
+            .map_err(|_| Status::not_found("DFut canceled."))?;
 
         let b = bincode::serialize(t.as_serialize()).unwrap();
         Ok(Response::new(GetOrWatchResponse { object: b }))
@@ -546,7 +566,7 @@ mod local_store_test {
         };
         let want = vec![1];
 
-        local_store.insert(key.clone(), want.clone());
+        local_store.insert(key.clone(), want.clone()).unwrap();
         let got: Arc<Vec<u8>> = local_store
             .get_or_watch(key)
             .await
@@ -586,7 +606,7 @@ mod local_store_test {
         });
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        local_store.insert(key.clone(), want.clone());
+        local_store.insert(key.clone(), want.clone()).unwrap();
 
         let _ = jh.await.unwrap();
     }

@@ -77,6 +77,7 @@ impl DScheduler {
         address: &str,
         lifetime_id: u64,
         lifetime_list_id: u64,
+        failed_tasks: Vec<u64>,
     ) -> Result<HeartBeatResponse, Box<dyn std::error::Error>> {
         let mut global_scheduler = self.d_scheduler_client.global_scheduler.clone();
         Ok(global_scheduler
@@ -84,6 +85,7 @@ impl DScheduler {
                 address: address.to_string(),
                 lifetime_id,
                 lifetime_list_id,
+                failed_tasks,
                 ..Default::default()
             })
             .await?
@@ -212,13 +214,14 @@ impl DSchedulerClient {
     pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {
         let address = self.schedule_with_retry(&w).await;
 
-        let maybe_client = self
-            .worker_service_client_cache
-            .lock()
-            .unwrap()
-            .get(&address)
-            .map(|client| client.clone())
-            .clone();
+        let maybe_client = {
+            self.worker_service_client_cache
+                .lock()
+                .unwrap()
+                .get(&address)
+                .map(|client| client.clone())
+                .clone()
+        };
 
         let mut client = match maybe_client {
             Some(client) => client,

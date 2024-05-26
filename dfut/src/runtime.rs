@@ -24,7 +24,9 @@ use crate::{
         d_store_service::d_store_service_server::DStoreServiceServer, DStore, DStoreClient,
         DStoreId, ValueTrait,
     },
-    global_scheduler::global_scheduler_service::{HeartBeatResponse, RegisterResponse},
+    global_scheduler::global_scheduler_service::{
+        FailedTasks, HeartBeatResponse, RegisterResponse,
+    },
     timer::Timer,
     work::{IntoWork, Work},
     Error,
@@ -43,6 +45,9 @@ struct SharedRuntimeState {
     lifetimes: Mutex<HashMap<String, u64>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
+
+    failed_local_tasks: Mutex<Vec<u64>>,
+    failed_remote_tasks: Mutex<HashMap<String, FailedTasks>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +90,9 @@ impl RootRuntime {
                 lifetimes: Mutex::default(),
                 lifetime_id,
                 next_task_id,
+
+                failed_local_tasks: Mutex::default(),
+                failed_remote_tasks: Mutex::default(),
             }),
 
             heart_beat_timeout,
@@ -144,11 +152,20 @@ impl RootRuntime {
                 .lifetime_list_id
                 .load(Ordering::SeqCst);
 
+            let failed_local_tasks = {
+                self.shared_runtime_state
+                    .failed_local_tasks
+                    .lock()
+                    .unwrap()
+                    .clone()
+            };
+
             // TODO: retry & graceful fail.
             let HeartBeatResponse {
                 lifetime_id,
                 lifetime_list_id,
                 lifetimes,
+                failed_tasks,
                 ..
             } = self
                 .shared_runtime_state
@@ -157,12 +174,25 @@ impl RootRuntime {
                     &self.shared_runtime_state.local_server_address,
                     local_lifetime_id,
                     local_lifetime_list_id,
+                    failed_local_tasks,
                 )
                 .await
                 .unwrap();
 
             if lifetime_list_id > local_lifetime_list_id {
                 *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes;
+            }
+
+            {
+                let mut failed_remote_tasks = self
+                    .shared_runtime_state
+                    .failed_remote_tasks
+                    .lock()
+                    .unwrap();
+                if *failed_remote_tasks != failed_tasks {
+                    // TODO: clear d_store
+                    *failed_remote_tasks = failed_tasks;
+                }
             }
 
             if lifetime_id != local_lifetime_id {
@@ -184,6 +214,8 @@ impl RootRuntime {
                 // don't reset the object_id.
                 self.shared_runtime_state.d_store.clear();
             }
+
+            // TODO: insert tombstone for tasks that are running on this worker
 
             tokio::time::sleep(sleep_for).await;
         }
@@ -541,11 +573,24 @@ impl Runtime {
 
                 let t = fut.await;
 
+                let failed = false;
+                if failed {
+                    let mut failed_local_tasks =
+                        rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
+                    if rt.lifetime_id == rt.shared_runtime_state.lifetime_id.load(Ordering::SeqCst)
+                    {
+                        failed_local_tasks.push(rt.task_id);
+                    }
+                    return;
+                }
+
                 let size = size_ser::to_size(&t).unwrap();
                 let took = rt.finish_local_work(&fn_name, size);
 
                 histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
                 histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
+
+                // TODO: check for task tombstone here to avoid publishing and error instead.
 
                 // TODO: pass owner info to d_store to allow for tombstone propagation.
                 rt.shared_runtime_state
