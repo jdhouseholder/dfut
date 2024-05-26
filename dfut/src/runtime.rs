@@ -29,7 +29,7 @@ use crate::{
     },
     timer::Timer,
     work::{IntoWork, Work},
-    Error,
+    DResult, Error,
 };
 
 const DFUT_RETRIES: usize = 3;
@@ -131,7 +131,7 @@ impl RootRuntime {
         f: FutFn,
     ) -> DoWorkResponse
     where
-        F: Future<Output = T> + Send + 'static,
+        F: Future<Output = DResult<T>> + Send + 'static,
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
@@ -326,7 +326,7 @@ impl Runtime {
         elapsed
     }
 
-    async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> Result<T, Error>
+    async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
@@ -368,7 +368,7 @@ impl Runtime {
                         .d_scheduler
                         .schedule(self.task_id, work.clone())
                         .await;
-                    let t: Result<T, Error> = self
+                    let t: DResult<T> = self
                         .shared_runtime_state
                         .d_store
                         .get_or_watch(d_store_id.clone())
@@ -401,7 +401,7 @@ impl Runtime {
         }
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
@@ -433,7 +433,7 @@ impl Runtime {
         }
     }
 
-    pub async fn cancel<T>(&self, d_fut: DFut<T>) -> Result<(), Error> {
+    pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
@@ -459,7 +459,7 @@ impl Runtime {
         }
     }
 
-    pub async fn share<T>(&self, d_fut: &DFut<T>) -> Result<DFut<T>, Error> {
+    pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
@@ -480,7 +480,7 @@ impl Runtime {
         }
     }
 
-    pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> Result<Vec<DFut<T>>, Error> {
+    pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
@@ -501,7 +501,7 @@ impl Runtime {
         }
     }
 
-    pub async fn d_box<T>(&self, t: T) -> Result<DFut<T>, Error>
+    pub async fn d_box<T>(&self, t: T) -> DResult<DFut<T>>
     where
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
@@ -550,7 +550,7 @@ impl Runtime {
     //
     fn do_local_work<F, T>(&self, fn_name: &str, fut: F) -> DStoreId
     where
-        F: Future<Output = T> + Send + 'static,
+        F: Future<Output = DResult<T>> + Send + 'static,
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
         let d_store_id = self.next_d_store_id();
@@ -571,18 +571,19 @@ impl Runtime {
             async move {
                 rt.start_timer();
 
-                let t = fut.await;
-
-                let failed = false;
-                if failed {
-                    let mut failed_local_tasks =
-                        rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
-                    if rt.lifetime_id == rt.shared_runtime_state.lifetime_id.load(Ordering::SeqCst)
-                    {
-                        failed_local_tasks.push(rt.task_id);
+                let t = match fut.await {
+                    Ok(t) => t,
+                    Err(Error::System) => {
+                        let mut failed_local_tasks =
+                            rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
+                        if rt.lifetime_id
+                            == rt.shared_runtime_state.lifetime_id.load(Ordering::SeqCst)
+                        {
+                            failed_local_tasks.push(rt.task_id);
+                        }
+                        return;
                     }
-                    return;
-                }
+                };
 
                 let size = size_ser::to_size(&t).unwrap();
                 let took = rt.finish_local_work(&fn_name, size);
@@ -590,9 +591,26 @@ impl Runtime {
                 histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
                 histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
 
-                // TODO: check for task tombstone here to avoid publishing and error instead.
+                {
+                    let failed_remote_tasks =
+                        rt.shared_runtime_state.failed_remote_tasks.lock().unwrap();
+                    if let Some(failed_tasks) = failed_remote_tasks.get(&rt.parent_info.address) {
+                        if rt.parent_info.lifetime_id == failed_tasks.lifetime_id
+                            && failed_tasks.task_id.contains(&rt.parent_info.task_id)
+                        {
+                            rt.shared_runtime_state
+                                .failed_local_tasks
+                                .lock()
+                                .unwrap()
+                                .push(rt.task_id);
+                            return;
+                        }
+                    }
+                }
 
-                // TODO: pass owner info to d_store to allow for tombstone propagation.
+                // TODO: check parent lifeitime id vs rt.parent_info.lifeitime
+
+                // TODO: pass owner info to d_store to allow for parent based cleanup.
                 rt.shared_runtime_state
                     .d_store
                     .publish(d_store_id, t)
@@ -605,7 +623,7 @@ impl Runtime {
 
     pub fn do_local_work_fut<F, T, FutFn>(&self, fn_name: &str, f: FutFn) -> DFut<T>
     where
-        F: Future<Output = T> + Send + 'static,
+        F: Future<Output = DResult<T>> + Send + 'static,
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
@@ -675,7 +693,7 @@ impl RuntimeClient {
         d_store_id.into()
     }
 
-    pub async fn wait<T>(&self, d_fut: DFut<T>) -> Result<T, Error>
+    pub async fn wait<T>(&self, d_fut: DFut<T>) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
@@ -685,7 +703,7 @@ impl RuntimeClient {
         }
     }
 
-    pub async fn cancel<T>(&self, d_fut: DFut<T>) -> Result<(), Error>
+    pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()>
     where
         T: DeserializeOwned,
     {
@@ -695,7 +713,7 @@ impl RuntimeClient {
         }
     }
 
-    pub async fn share<T>(&self, d_fut: &DFut<T>) -> Result<DFut<T>, Error> {
+    pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.d_store_client.share(id, 1).await?;
@@ -705,7 +723,7 @@ impl RuntimeClient {
         }
     }
 
-    pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> Result<Vec<DFut<T>>, Error> {
+    pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.d_store_client.share(id, n).await?;
@@ -715,7 +733,7 @@ impl RuntimeClient {
         }
     }
 
-    pub async fn d_box<T>(&self, _t: T) -> Result<DFut<T>, Error>
+    pub async fn d_box<T>(&self, _t: T) -> DResult<DFut<T>>
     where
         T: Serialize + Send + 'static,
     {

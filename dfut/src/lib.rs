@@ -18,6 +18,9 @@ mod runtime;
 mod timer;
 mod work;
 
+// Try is experimental so we can't create our own type that usese the ? operator.
+pub type DResult<T> = Result<T, Error>;
+
 pub use d_fut::DFut;
 pub use d_scheduler::worker_service::{
     worker_service_client::WorkerServiceClient,

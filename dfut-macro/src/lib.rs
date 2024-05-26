@@ -56,7 +56,24 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
                 let d_fut_output = match &output {
                     syn::ReturnType::Default => quote! { dfut::DFut<()> },
-                    syn::ReturnType::Type(_, ty) => quote! { dfut::DFut<#ty> },
+                    syn::ReturnType::Type(_, ty) => {
+                        let syn::Type::Path(ty) = *ty.clone() else {
+                            panic!()
+                        };
+                        assert_eq!(
+                            ty.path.segments.first().unwrap().ident.to_string(),
+                            "DResult"
+                        );
+                        let last_segment = ty.path.segments.last().unwrap();
+                        let syn::PathArguments::AngleBracketed(generics) = &last_segment.arguments
+                        else {
+                            panic!()
+                        };
+                        let syn::GenericArgument::Type(ty) = &generics.args[0] else {
+                            panic!()
+                        };
+                        quote! { dfut::DFut<#ty> }
+                    }
                 };
 
                 let mut fn_arg_idents = Vec::new();
@@ -227,7 +244,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                Self { runtime }
            }
 
-            pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> Result<T, dfut::Error>
+            pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> dfut::DResult<T>
             where
                 T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
             {
@@ -290,11 +307,11 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 ).await;
             }
 
-            pub async fn d_await<T>(&self, d_fut: DFut<T>) -> T
+            pub async fn d_await<T>(&self, d_fut: DFut<T>) -> dfut::DResult<T>
             where
                 T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
             {
-                self.runtime.wait(d_fut).await.unwrap()
+                self.runtime.wait(d_fut).await
             }
 
             pub async fn d_cancel<T>(&self, d_fut: DFut<T>)
@@ -367,7 +384,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn d_await(item: TokenStream) -> TokenStream {
     let e: syn::Expr = syn::parse(item).unwrap();
-    let expanded = quote! { self.d_await(#e).await };
+    let expanded = quote! { self.d_await(#e).await? };
     TokenStream::from(expanded)
 }
 
