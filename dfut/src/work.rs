@@ -1,7 +1,4 @@
-use crate::{
-    d_scheduler::worker_service::DoWorkRequest,
-    global_scheduler::global_scheduler_service::ScheduleRequest,
-};
+use crate::d_scheduler::worker_service::DoWorkRequest;
 
 pub trait IntoWork {
     fn into_work(&self) -> Work;
@@ -11,14 +8,6 @@ pub trait IntoWork {
 pub struct Work {
     pub fn_name: String,
     pub args: Vec<u8>,
-}
-
-impl<'a> Into<ScheduleRequest> for &'a Work {
-    fn into(self) -> ScheduleRequest {
-        ScheduleRequest {
-            fn_name: self.fn_name.clone(),
-        }
-    }
 }
 
 impl Work {

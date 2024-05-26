@@ -2,8 +2,6 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use metrics::counter;
-use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::error;
@@ -14,8 +12,9 @@ pub(crate) mod global_scheduler_service {
 
 use global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse, RegisterRequest,
-    RegisterResponse, ScheduleRequest, ScheduleResponse, UnRegisterRequest, UnRegisterResponse,
+    FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
+    RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, Stats,
+    UnRegisterRequest, UnRegisterResponse,
 };
 
 const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 5; // TODO: pass through config
@@ -62,7 +61,7 @@ struct Lifetimes {
 
 #[derive(Debug, Default)]
 struct InnerGlobalScheduler {
-    fn_availability: HashMap<String, Vec<String>>,
+    stats: HashMap<String, Stats>,
     lifetimes: Lifetimes,
 }
 
@@ -76,31 +75,6 @@ impl GlobalScheduler {
     async fn expire_lifetimes(self: &Arc<Self>) {
         // Proposal that expires lifetime ids based on timeout.
         // On commit: remove addresses that have expired from fn_availability.
-    }
-
-    fn schedule_fn(&self, fn_name: &str) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap()
-            .fn_availability
-            .get(fn_name)?
-            .choose(&mut rand::thread_rng())
-            .map(|s| {
-                counter!("schedule_fn", "fn_name" => fn_name.to_string(), "choice" => s.clone())
-                    .increment(1);
-                s.clone()
-            })
-            .clone()
-    }
-
-    fn remove_address_from_index(&self, address: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        for v in inner.fn_availability.values_mut() {
-            if let Some(i) = v.iter().position(|s| s == &address) {
-                v.remove(i);
-                continue;
-            }
-        }
     }
 
     pub async fn serve(address: &str, _peers: Vec<String>) {
@@ -145,11 +119,17 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let RegisterRequest { address, fn_names } = request.into_inner();
 
         let mut inner = self.inner.lock().unwrap();
-        for fn_name in fn_names {
-            let p = inner.fn_availability.entry(fn_name.clone()).or_default();
-            p.push(address.clone());
-            p.dedup();
-        }
+        let fn_stats: HashMap<String, FnStats> = fn_names
+            .into_iter()
+            .map(|fn_name| (fn_name, FnStats::default()))
+            .collect();
+        inner.stats.insert(
+            address.to_string(),
+            Stats {
+                fn_stats,
+                ..Default::default()
+            },
+        );
 
         // TODO: store address -> lifetime_id ~forever.
         let lifetime_id = match inner.lifetimes.m.entry(address) {
@@ -174,6 +154,19 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         }))
     }
 
+    async fn register_client(
+        &self,
+        request: Request<RegisterClientRequest>,
+    ) -> Result<Response<RegisterClientResponse>, Status> {
+        let RegisterClientRequest {} = request.into_inner();
+
+        Ok(Response::new(RegisterClientResponse {
+            client_id: "unique opaque string".to_string(),
+            lifetime_id: 0,
+            heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+        }))
+    }
+
     async fn heart_beat(
         &self,
         request: Request<HeartBeatRequest>,
@@ -193,7 +186,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 lifetime_id,
                 lifetime_list_id: inner.lifetimes.list_id,
                 lifetimes: HashMap::new(),
-                stats: HashMap::new(),
+                stats: inner.stats.clone(),
                 failed_tasks: HashMap::new(),
             }));
         }
@@ -253,22 +246,8 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             lifetime_id,
             lifetime_list_id,
             lifetimes,
-            stats: HashMap::new(),
+            stats: inner.stats.clone(),
             failed_tasks: HashMap::new(),
-        }))
-    }
-
-    async fn schedule(
-        &self,
-        request: Request<ScheduleRequest>,
-    ) -> Result<Response<ScheduleResponse>, Status> {
-        let ScheduleRequest { fn_name } = request.into_inner();
-
-        let address = self.schedule_fn(&fn_name);
-
-        Ok(Response::new(ScheduleResponse {
-            leader_redirect: None,
-            address,
         }))
     }
 
@@ -278,7 +257,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<UnRegisterResponse>, Status> {
         let UnRegisterRequest { address } = request.into_inner();
 
-        self.remove_address_from_index(&address);
+        self.inner.lock().unwrap().stats.remove(&address);
 
         Ok(Response::new(UnRegisterResponse::default()))
     }

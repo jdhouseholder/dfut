@@ -11,7 +11,7 @@ use crate::{
     d_store::DStoreId,
     global_scheduler::global_scheduler_service::{
         global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
-        HeartBeatResponse, RegisterRequest, RegisterResponse, ScheduleRequest, ScheduleResponse,
+        HeartBeatResponse, RegisterRequest, RegisterResponse,
     },
     work::Work,
 };
@@ -151,8 +151,8 @@ impl DScheduler {
             .track(took, ret_size);
     }
 
-    pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {
-        self.d_scheduler_client.schedule(task_id, w).await
+    pub(crate) async fn do_work(&self, address: &str, task_id: u64, w: Work) -> DStoreId {
+        self.d_scheduler_client.do_work(address, task_id, w).await
     }
 }
 
@@ -197,28 +197,12 @@ impl DSchedulerClient {
         panic!();
     }
 
-    async fn schedule_with_retry(&self, w: &Work) -> String {
-        let mut global_scheduler = self.global_scheduler.clone();
-        for i in 0..5 {
-            let req: ScheduleRequest = w.into();
-            let ScheduleResponse { address, .. } =
-                global_scheduler.schedule(req).await.unwrap().into_inner();
-            if let Some(address) = address {
-                return address;
-            }
-            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
-        }
-        panic!()
-    }
-
-    pub(crate) async fn schedule(&self, task_id: u64, w: Work) -> DStoreId {
-        let address = self.schedule_with_retry(&w).await;
-
+    pub(crate) async fn do_work(&self, address: &str, task_id: u64, w: Work) -> DStoreId {
         let maybe_client = {
             self.worker_service_client_cache
                 .lock()
                 .unwrap()
-                .get(&address)
+                .get(address)
                 .map(|client| client.clone())
                 .clone()
         };
@@ -231,7 +215,7 @@ impl DSchedulerClient {
                 self.worker_service_client_cache
                     .lock()
                     .unwrap()
-                    .put(address.clone(), client.clone());
+                    .put(address.to_string(), client.clone());
                 client
             }
         };
