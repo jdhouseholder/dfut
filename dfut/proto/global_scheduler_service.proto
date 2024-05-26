@@ -69,14 +69,6 @@ message HeartBeatResponse {
 	map<string, FailedTasks> failed_tasks = 6;
 }
 
-message UnRegisterRequest {
-	string address = 1;
-}
-
-message UnRegisterResponse {
-	optional string leader_redirect = 1;
-}
-
 message RaftStepRequest {
 	oneof req_type {
 		string proposal = 1;
@@ -91,6 +83,5 @@ service GlobalSchedulerService {
 	rpc Register(RegisterRequest) returns (RegisterResponse);
 	rpc RegisterClient(RegisterClientRequest) returns (RegisterClientResponse);
 	rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
-	rpc UnRegister(UnRegisterRequest) returns (UnRegisterResponse);
 	rpc RaftStep(RaftStepRequest) returns (RaftStepResponse);
 }

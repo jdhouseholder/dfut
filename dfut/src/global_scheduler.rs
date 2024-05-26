@@ -14,7 +14,6 @@ use global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
     FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
     RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, Stats,
-    UnRegisterRequest, UnRegisterResponse,
 };
 
 const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 5; // TODO: pass through config
@@ -249,17 +248,6 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             stats: inner.stats.clone(),
             failed_tasks: HashMap::new(),
         }))
-    }
-
-    async fn un_register(
-        &self,
-        request: Request<UnRegisterRequest>,
-    ) -> Result<Response<UnRegisterResponse>, Status> {
-        let UnRegisterRequest { address } = request.into_inner();
-
-        self.inner.lock().unwrap().stats.remove(&address);
-
-        Ok(Response::new(UnRegisterResponse::default()))
     }
 
     async fn raft_step(
