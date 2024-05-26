@@ -307,25 +307,25 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 ).await;
             }
 
-            pub async fn d_await<T>(&self, d_fut: DFut<T>) -> dfut::DResult<T>
+            pub async fn d_await<T>(&self, d_fut: dfut::DFut<T>) -> dfut::DResult<T>
             where
                 T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
             {
                 self.runtime.wait(d_fut).await
             }
 
-            pub async fn d_cancel<T>(&self, d_fut: DFut<T>)
+            pub async fn d_cancel<T>(&self, d_fut: dfut::DFut<T>) -> dfut::DResult<()>
             where
                 T: dfut::DeserializeOwned
             {
-                self.runtime.cancel(d_fut).await.unwrap()
+                self.runtime.cancel(d_fut).await
             }
 
-            pub async fn d_box<T>(&self, t: T) -> DFut<T>
+            pub async fn d_box<T>(&self, t: T) -> dfut::DResult<dfut::DFut<T>>
             where
                 T: dfut::Serialize + std::fmt::Debug + Send + Sync + 'static
             {
-                self.runtime.d_box(t).await.unwrap()
+                self.runtime.d_box(t).await
             }
         }
 
