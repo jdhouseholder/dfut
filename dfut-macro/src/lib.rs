@@ -367,14 +367,6 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
                 Ok(dfut::tonic::Response::new(resp))
             }
-
-            async fn cascade_fail(
-                &self,
-                request: dfut::tonic::Request<dfut::CascadeFailRequest>,
-            ) -> Result<dfut::tonic::Response<dfut::CascadeFailResponse>, dfut::tonic::Status> {
-                let dfut::CascadeFailRequest { .. } = request.into_inner();
-                Ok(dfut::tonic::Response::new(dfut::CascadeFailResponse {}))
-            }
         }
     };
 

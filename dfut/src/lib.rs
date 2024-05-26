@@ -25,7 +25,7 @@ pub use d_fut::DFut;
 pub use d_scheduler::worker_service::{
     worker_service_client::WorkerServiceClient,
     worker_service_server::{WorkerService, WorkerServiceServer},
-    CascadeFailRequest, CascadeFailResponse, DoWorkRequest, DoWorkResponse,
+    DoWorkRequest, DoWorkResponse,
 };
 pub use global_scheduler::GlobalScheduler;
 pub use runtime::{RootRuntime, Runtime, RuntimeClient, Where};

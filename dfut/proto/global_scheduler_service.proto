@@ -41,17 +41,17 @@ message Stats {
 	map<string, FnStats> fn_stats = 6;
 }
 
-message FailedTasks {
-	fixed64 lifetime_id = 2;
-	repeated fixed64 task_id = 3;
-}
-
 message HeartBeatRequest {
 	string address = 1;
 	fixed64 lifetime_id = 2;
 	fixed64 lifetime_list_id = 3;
 	Stats stats = 4;
 	repeated fixed64 failed_tasks = 5;
+}
+
+message FailedTasks {
+	fixed64 lifetime_id = 2;
+	repeated fixed64 task_id = 3;
 }
 
 message HeartBeatResponse {

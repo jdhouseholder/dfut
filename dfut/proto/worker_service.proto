@@ -17,16 +17,6 @@ message DoWorkResponse {
 	fixed64 object_id = 4;
 }
 
-message CascadeFailRequest {
-	string address = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 task_id = 3;
-}
-
-message CascadeFailResponse {
-}
-
 service WorkerService {
 	rpc DoWork(DoWorkRequest) returns (DoWorkResponse);
-	rpc CascadeFail(CascadeFailRequest) returns (CascadeFailResponse);
 }
