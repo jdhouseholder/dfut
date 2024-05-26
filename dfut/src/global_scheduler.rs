@@ -160,6 +160,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let RegisterClientRequest {} = request.into_inner();
 
         Ok(Response::new(RegisterClientResponse {
+            leader_redirect: None,
             client_id: "unique opaque string".to_string(),
             lifetime_id: 0,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,

@@ -16,9 +16,10 @@ message RegisterClientRequest {
 }
 
 message RegisterClientResponse {
-	string client_id = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 heart_beat_timeout = 3;
+	optional string leader_redirect = 1;
+	string client_id = 2;
+	fixed64 lifetime_id = 3;
+	fixed64 heart_beat_timeout = 4;
 }
 
 message FnStats {

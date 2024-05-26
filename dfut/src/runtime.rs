@@ -761,6 +761,7 @@ async fn heart_beat(global_scheduler_address: &str, shared: Arc<Mutex<SharedRunt
         client_id,
         lifetime_id,
         heart_beat_timeout,
+        ..
     } = global_scheduler
         .register_client(RegisterClientRequest {})
         .await
