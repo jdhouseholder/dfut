@@ -20,7 +20,7 @@ pub(crate) mod worker_service {
     tonic::include_proto!("worker_service");
 }
 
-use worker_service::{worker_service_client::WorkerServiceClient, DoWorkResponse};
+use worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest, DoWorkResponse};
 
 const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
 
@@ -219,13 +219,22 @@ impl DSchedulerClient {
                 client
             }
         };
-        let req = w.into_do_work_request(task_id);
         let DoWorkResponse {
             address,
             lifetime_id,
             task_id,
             object_id,
-        } = client.do_work(req).await.unwrap().into_inner();
+        } = client
+            .do_work(DoWorkRequest {
+                parent_address: "TODO".to_string(),
+                parent_lifetime_id: 1,
+                parent_task_id: task_id,
+                fn_name: w.fn_name,
+                args: w.args,
+            })
+            .await
+            .unwrap()
+            .into_inner();
         DStoreId {
             address,
             lifetime_id,
