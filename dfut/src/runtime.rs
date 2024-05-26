@@ -454,7 +454,7 @@ impl Runtime {
 
                 t
             }
-            InnerDFut::Error(err) => return Err(err.clone()),
+            InnerDFut::Error(err) => Err(err.clone()),
         }
     }
 
@@ -848,7 +848,7 @@ impl RuntimeClient {
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id.clone()).await,
-            InnerDFut::Error(err) => return Err(err.clone()),
+            InnerDFut::Error(err) => Err(err.clone()),
         }
     }
 
@@ -858,7 +858,7 @@ impl RuntimeClient {
     {
         match &d_fut.inner {
             InnerDFut::DStore(id) => self.d_store_client.decrement_or_remove(id.clone(), 1).await,
-            InnerDFut::Error(err) => return Err(err.clone()),
+            InnerDFut::Error(err) => Err(err.clone()),
         }
     }
 

@@ -1,3 +1,5 @@
+// TODO: Once we have a nice way to make DFut Try (use ? operator to change control flow) we
+// can use inner dfut error rather than DResult.
 use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
