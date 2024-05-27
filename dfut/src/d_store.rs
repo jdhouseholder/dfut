@@ -278,6 +278,18 @@ impl LocalStore {
         }
     }
 
+    fn local_task_failure(&self, d_store_id: DStoreId) {
+        let mut m = self.m.lock().unwrap();
+        if let Some(v) = m.remove(&d_store_id) {
+            match &v.value_state {
+                ValueState::Watch { tx, .. } => {
+                    let _ = tx.send(None);
+                }
+                ValueState::Here { .. } => {}
+            }
+        }
+    }
+
     fn clear(&self) {
         counter!("local_store::clear").increment(1);
 
@@ -381,6 +393,9 @@ impl DStore {
         self.local_store
             .task_failure(address, new_lifetime_id, task_id);
     }
+    pub(crate) fn local_task_failure(&self, d_store_id: DStoreId) {
+        self.local_store.local_task_failure(d_store_id);
+    }
 
     pub(crate) fn clear(&self) {
         self.local_store.clear()
@@ -449,7 +464,8 @@ impl DStoreClient {
             v
         } {
             // MUST decrement remote.
-            self.decrement_or_remove(key, 1).await?;
+            // TODO: only don't error on not found.
+            let _ = self.decrement_or_remove(key, 1).await;
             return Ok((*v).clone());
         }
 
@@ -543,7 +559,7 @@ impl DStoreService for Arc<DStore> {
             .local_store
             .get_or_watch(id.clone())
             .await
-            .map_err(|_| Status::not_found(""))?;
+            .map_err(|_| Status::not_found("get_or_watch"))?;
 
         let b = bincode::serialize(t.as_serialize()).unwrap();
         Ok(Response::new(GetOrWatchResponse { object: b }))

@@ -160,6 +160,9 @@ impl RootRuntime {
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
+        // TODO: check (parent_address, parent_lifetime_id) before executing local work to ensure
+        // that we don't ever execute old work.
+
         let runtime = self.new_child(parent_address, parent_lifetime_id, parent_task_id);
         let fut = f(runtime.clone());
         let d_store_id = runtime.do_local_work(fn_name, fut);
@@ -461,7 +464,7 @@ impl Runtime {
                         inner
                             .calls
                             .insert(d_store_id.clone(), Call::RetriedOk { v: Arc::clone(&v) });
-                        tx.send(v).unwrap();
+                        let _ = tx.send(v);
 
                         return Ok(t);
                     }
@@ -487,13 +490,13 @@ impl Runtime {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
-        match &d_fut.inner {
+        match d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
 
                 if let Some(valid) = self.is_valid_id(&id) {
                     if !valid {
-                        return self.try_retry_dfut(id).await;
+                        return self.try_retry_dfut(&id).await;
                     }
                 }
 
@@ -504,23 +507,23 @@ impl Runtime {
                     .await;
 
                 if let Err(_) = &t {
-                    return self.try_retry_dfut(id).await;
+                    return self.try_retry_dfut(&id).await;
                 }
 
                 self.start_timer();
 
                 t
             }
-            InnerDFut::Error(err) => Err(err.clone()),
+            InnerDFut::Error(err) => Err(err),
         }
     }
 
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()> {
-        match &d_fut.inner {
+        match d_fut.inner {
             InnerDFut::DStore(id) => {
                 self.stop_timer();
 
-                if let Some(valid) = self.is_valid_id(id) {
+                if let Some(valid) = self.is_valid_id(&id) {
                     if !valid {
                         self.start_timer();
                         // Ignore failure.
@@ -530,14 +533,14 @@ impl Runtime {
 
                 self.shared_runtime_state
                     .d_store
-                    .decrement_or_remove(id.clone(), 1)
+                    .decrement_or_remove(id, 1)
                     .await?;
 
                 self.start_timer();
 
                 Ok(())
             }
-            InnerDFut::Error(err) => Err(err.clone()),
+            InnerDFut::Error(err) => Err(err),
         }
     }
 
@@ -657,6 +660,10 @@ impl Runtime {
                     Ok(t) => t,
                     Err(Error::System) => {
                         // TODO cleanup d store id
+                        rt.shared_runtime_state
+                            .d_store
+                            .local_task_failure(d_store_id);
+
                         let mut failed_local_tasks =
                             rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
                         if rt.lifetime_id
@@ -811,6 +818,7 @@ struct SharedRuntimeClientState {
 
 // TODO: Runtime clients need to heartbeat with the global scheduler.
 // They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
+// TODO: retry in the client too.
 pub struct RuntimeClient {
     shared: Arc<Mutex<SharedRuntimeClientState>>,
     peer_worker_client: PeerWorkerClient,
@@ -923,9 +931,9 @@ impl RuntimeClient {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id.clone()).await,
-            InnerDFut::Error(err) => Err(err.clone()),
+        match d_fut.inner {
+            InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id).await,
+            InnerDFut::Error(err) => Err(err),
         }
     }
 
@@ -933,9 +941,9 @@ impl RuntimeClient {
     where
         T: DeserializeOwned,
     {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => self.d_store_client.decrement_or_remove(id.clone(), 1).await,
-            InnerDFut::Error(err) => Err(err.clone()),
+        match d_fut.inner {
+            InnerDFut::DStore(id) => self.d_store_client.decrement_or_remove(id, 1).await,
+            InnerDFut::Error(err) => Err(err),
         }
     }
 
