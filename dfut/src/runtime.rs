@@ -34,7 +34,7 @@ use crate::{
     DResult, Error,
 };
 
-const DFUT_RETRIES: usize = 3;
+const DFUT_RETRIES: usize = 10;
 
 #[derive(Debug)]
 struct SharedRuntimeState {
@@ -757,7 +757,6 @@ impl Runtime {
                 .unwrap()
         };
 
-        // TODO: make sure this has the current runtime and track the ownership.
         let d_store_id = self
             .shared_runtime_state
             .peer_worker_client
@@ -769,7 +768,6 @@ impl Runtime {
                 work.clone(),
             )
             .await;
-
         self.track_call(d_store_id.clone(), Call::Remote { work });
 
         d_store_id.into()
@@ -816,16 +814,13 @@ struct SharedRuntimeClientState {
     fn_name_to_addresses: FnIndex,
 }
 
-// TODO: Runtime clients need to heartbeat with the global scheduler.
-// They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
-// TODO: retry in the client too.
-pub struct RuntimeClient {
+pub struct RootRuntimeClient {
     shared: Arc<Mutex<SharedRuntimeClientState>>,
     peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 }
 
-impl RuntimeClient {
+impl RootRuntimeClient {
     pub async fn new(global_scheduler_address: &str) -> Self {
         let shared = Arc::new(Mutex::new(SharedRuntimeClientState::default()));
         tokio::spawn({
@@ -897,33 +892,60 @@ impl RuntimeClient {
         }
     }
 
+    pub fn new_runtime_client(&self) -> RuntimeClient {
+        RuntimeClient {
+            shared: Arc::clone(&self.shared),
+            peer_worker_client: self.peer_worker_client.clone(),
+            d_store_client: self.d_store_client.clone(),
+
+            remote_work: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+// TODO: Runtime clients need to heartbeat with the global scheduler.
+// They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
+// TODO: retry in the client too.
+pub struct RuntimeClient {
+    shared: Arc<Mutex<SharedRuntimeClientState>>,
+    peer_worker_client: PeerWorkerClient,
+    d_store_client: DStoreClient,
+
+    remote_work: Mutex<HashMap<DStoreId, Work>>,
+}
+
+impl RuntimeClient {
     pub async fn do_remote_work<I, T>(&self, iw: I) -> DFut<T>
     where
         I: IntoWork,
     {
         let w = iw.into_work();
-        let (address, task_id) = {
+        let (client_id, address, lifetime_id, task_id) = {
             'scheduled: loop {
                 {
                     let mut shared = self.shared.lock().unwrap();
                     if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name) {
+                        let client_id = shared.client_id.clone();
+                        let lifetime_id = shared.lifetime_id;
                         let task_id = shared.next_task_id;
                         shared.next_task_id += 1;
-                        break 'scheduled (address, task_id);
+                        break 'scheduled (client_id, address, lifetime_id, task_id);
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         };
-        let (client_id, lifetime_id) = {
-            let shared = self.shared.lock().unwrap();
-            (shared.client_id.clone(), shared.lifetime_id)
-        };
         let d_store_id = self
             .peer_worker_client
             .clone()
-            .do_work(&client_id, lifetime_id, task_id, &address, w)
+            .do_work(&client_id, lifetime_id, task_id, &address, w.clone())
             .await;
+
+        self.remote_work
+            .lock()
+            .unwrap()
+            .insert(d_store_id.clone(), w);
+
         d_store_id.into()
     }
 
@@ -932,7 +954,48 @@ impl RuntimeClient {
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
         match d_fut.inner {
-            InnerDFut::DStore(id) => self.d_store_client.get_or_watch(id).await,
+            InnerDFut::DStore(id) => {
+                let t = self.d_store_client.get_or_watch(id.clone()).await;
+
+                match t {
+                    Ok(t) => Ok(t),
+                    Err(e) => {
+                        if let Some(work) = { self.remote_work.lock().unwrap().remove(&id) } {
+                            // TODO: dedup like try_retry_dfut.
+                            for _ in 0..DFUT_RETRIES {
+                                let mut shared = self.shared.lock().unwrap();
+                                if let Some(address) =
+                                    shared.fn_name_to_addresses.schedule_fn(&work.fn_name)
+                                {
+                                    let client_id = shared.client_id.clone();
+                                    let lifetime_id = shared.lifetime_id;
+                                    let task_id = shared.next_task_id;
+                                    shared.next_task_id += 1;
+
+                                    let d_store_id = self
+                                        .peer_worker_client
+                                        .clone()
+                                        .do_work(
+                                            &client_id,
+                                            lifetime_id,
+                                            task_id,
+                                            &address,
+                                            work.clone(),
+                                        )
+                                        .await;
+
+                                    if let Ok(t) =
+                                        self.d_store_client.get_or_watch(d_store_id.clone()).await
+                                    {
+                                        return Ok(t);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e)
+                    }
+                }
+            }
             InnerDFut::Error(err) => Err(err),
         }
     }

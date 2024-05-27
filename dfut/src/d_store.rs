@@ -256,7 +256,11 @@ impl LocalStore {
         }
 
         for id in remove {
-            m.remove(&id);
+            if let Some(v) = m.remove(&id) {
+                if let ValueState::Watch { tx, .. } = v.value_state {
+                    let _ = tx.send(None);
+                }
+            }
         }
     }
 
@@ -274,7 +278,11 @@ impl LocalStore {
         }
 
         for id in remove {
-            m.remove(&id);
+            if let Some(v) = m.remove(&id) {
+                if let ValueState::Watch { tx, .. } = v.value_state {
+                    let _ = tx.send(None);
+                }
+            }
         }
     }
 
@@ -297,7 +305,7 @@ impl LocalStore {
         for e in m.values() {
             match &e.value_state {
                 ValueState::Watch { tx, .. } => {
-                    tx.send(None).unwrap();
+                    let _ = tx.send(None);
                 }
                 ValueState::Here { .. } => {}
             }
@@ -402,7 +410,7 @@ impl DStore {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DStoreClient {
     lru: Arc<Mutex<LruCache<DStoreId, Arc<dyn Any + Send + Sync + 'static>>>>,
     d_store_service_client_cache: Arc<Mutex<LruCache<String, DStoreServiceClient<Channel>>>>,

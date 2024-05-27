@@ -21,6 +21,8 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let server_ident = syn::Ident::new(&format!("{short_worker_ty}Server"), Span::call_site());
+    let root_client_ident =
+        syn::Ident::new(&format!("{short_worker_ty}RootClient"), Span::call_site());
     let client_ident = syn::Ident::new(&format!("{short_worker_ty}Client"), Span::call_site());
     let work_enum_ident = syn::Ident::new(&format!("Work{short_worker_ty}"), Span::call_site());
 
@@ -232,18 +234,30 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
+        pub struct #root_client_ident {
+            root_runtime: dfut::RootRuntimeClient,
+        }
+
+        impl #root_client_ident {
+           pub async fn new(global_scheduler_address: &str) -> Self {
+               let root_runtime = dfut::RootRuntimeClient::new(
+                   global_scheduler_address
+               ).await;
+               Self { root_runtime }
+           }
+
+           pub fn new_client(&self) -> #client_ident {
+               #client_ident {
+                   runtime: self.root_runtime.new_runtime_client(),
+               }
+           }
+        }
+
         pub struct #client_ident {
             runtime: dfut::RuntimeClient,
         }
 
         impl #client_ident {
-           pub async fn new(global_scheduler_address: &str) -> Self {
-               let runtime = dfut::RuntimeClient::new(
-                   global_scheduler_address
-               ).await;
-               Self { runtime }
-           }
-
             pub async fn d_await<T>(&self, t: dfut::DFut<T>) -> dfut::DResult<T>
             where
                 T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
