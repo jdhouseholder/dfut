@@ -62,6 +62,7 @@ struct Lifetimes {
 struct InnerGlobalScheduler {
     stats: HashMap<String, Stats>,
     lifetimes: Lifetimes,
+    next_client_id: u64,
 }
 
 #[derive(Debug, Default)]
@@ -159,9 +160,16 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<RegisterClientResponse>, Status> {
         let RegisterClientRequest {} = request.into_inner();
 
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.next_client_id;
+            inner.next_client_id += 1;
+            id
+        };
+
         Ok(Response::new(RegisterClientResponse {
             leader_redirect: None,
-            client_id: "unique opaque string".to_string(),
+            client_id: format!("client-id-{id}"),
             lifetime_id: 0,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
         }))
