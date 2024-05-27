@@ -7,11 +7,7 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::{d_store::DStoreId, work::Work};
 
-pub(crate) mod worker_service {
-    tonic::include_proto!("worker_service");
-}
-
-use worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest, DoWorkResponse};
+use crate::services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerWorkerClient {
@@ -53,7 +49,6 @@ impl PeerWorkerClient {
                 .unwrap()
                 .get(address)
                 .map(|client| client.clone())
-                .clone()
         };
 
         let mut client = match maybe_client {
@@ -69,12 +64,7 @@ impl PeerWorkerClient {
             }
         };
 
-        let DoWorkResponse {
-            address,
-            lifetime_id,
-            task_id,
-            object_id,
-        } = client
+        let resp = client
             .do_work(DoWorkRequest {
                 parent_address: current_address.to_string(),
                 parent_lifetime_id: current_lifetime_id,
@@ -86,11 +76,6 @@ impl PeerWorkerClient {
             .unwrap()
             .into_inner();
 
-        DStoreId {
-            address,
-            lifetime_id,
-            task_id,
-            object_id,
-        }
+        resp.into()
     }
 }

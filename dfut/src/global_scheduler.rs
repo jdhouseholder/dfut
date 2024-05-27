@@ -6,11 +6,7 @@ use serde::{Deserialize, Serialize};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::error;
 
-pub(crate) mod global_scheduler_service {
-    tonic::include_proto!("global_scheduler_service");
-}
-
-use global_scheduler_service::{
+use crate::services::global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
     FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
     RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, Stats,
@@ -65,6 +61,7 @@ struct InnerGlobalScheduler {
     next_client_id: u64,
 }
 
+// TODO: Rename to Global Coordinator Service (or Global Control Service)
 #[derive(Debug, Default)]
 pub struct GlobalScheduler {
     inner: Mutex<InnerGlobalScheduler>,

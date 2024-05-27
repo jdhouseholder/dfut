@@ -16,6 +16,7 @@ mod d_store;
 mod global_scheduler;
 mod peer_work;
 mod runtime;
+mod services;
 mod timer;
 mod work;
 
@@ -24,12 +25,12 @@ pub type DResult<T> = Result<T, Error>;
 
 pub use d_fut::DFut;
 pub use global_scheduler::GlobalScheduler;
-pub use peer_work::worker_service::{
+pub use runtime::{RootRuntime, Runtime, RuntimeClient, Where};
+pub use services::worker_service::{
     worker_service_client::WorkerServiceClient,
     worker_service_server::{WorkerService, WorkerServiceServer},
     DoWorkRequest, DoWorkResponse,
 };
-pub use runtime::{RootRuntime, Runtime, RuntimeClient, Where};
 pub use work::{IntoWork, Work};
 
 pub use serde::{de::DeserializeOwned, Deserialize, Serialize};

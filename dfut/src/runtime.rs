@@ -15,21 +15,19 @@ use tonic::transport::{Channel, Endpoint, Server};
 use crate::{
     d_fut::{DFut, InnerDFut},
     d_scheduler::DScheduler,
-    d_store::{
-        d_store_service::d_store_service_server::DStoreServiceServer, DStore, DStoreClient,
-        DStoreId, ValueTrait,
-    },
-    global_scheduler::global_scheduler_service::{
-        global_scheduler_service_client::GlobalSchedulerServiceClient, FailedTasks,
-        HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
-        RegisterRequest, RegisterResponse, Stats,
-    },
-    peer_work::{
+    d_store::{DStore, DStoreClient, DStoreId, ValueTrait},
+    peer_work::PeerWorkerClient,
+    services::{
+        d_store_service::d_store_service_server::DStoreServiceServer,
+        global_scheduler_service::{
+            global_scheduler_service_client::GlobalSchedulerServiceClient, FailedTasks,
+            HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
+            RegisterRequest, RegisterResponse, Stats,
+        },
         worker_service::{
             worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
             DoWorkResponse,
         },
-        PeerWorkerClient,
     },
     timer::Timer,
     work::{IntoWork, Work},
@@ -829,7 +827,7 @@ impl RuntimeClient {
         tokio::spawn({
             let global_scheduler_address = global_scheduler_address.to_string();
             let shared = Arc::clone(&shared);
-            async move { Self::heart_beat(&global_scheduler_address, shared).await }
+            async move { Self::heart_beat_forever(&global_scheduler_address, shared).await }
         });
         Self {
             shared,
@@ -848,7 +846,7 @@ impl RuntimeClient {
         panic!();
     }
 
-    async fn heart_beat(
+    async fn heart_beat_forever(
         global_scheduler_address: &str,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
     ) {

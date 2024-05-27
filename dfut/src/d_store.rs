@@ -15,13 +15,9 @@ use tonic::{
     Request, Response, Status,
 };
 
-use crate::{peer_work::worker_service::DoWorkResponse, Error};
+use crate::{services::worker_service::DoWorkResponse, Error};
 
-pub(crate) mod d_store_service {
-    tonic::include_proto!("d_store_service");
-}
-
-use d_store_service::{
+use crate::services::d_store_service::{
     d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
     DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
     ShareNRequest, ShareNResponse,
@@ -66,6 +62,17 @@ impl Into<DoWorkResponse> for DStoreId {
     }
 }
 
+impl From<DoWorkResponse> for DStoreId {
+    fn from(v: DoWorkResponse) -> Self {
+        Self {
+            address: v.address,
+            lifetime_id: v.lifetime_id,
+            task_id: v.task_id,
+            object_id: v.object_id,
+        }
+    }
+}
+
 // TODO: Should we store errors in the d store?
 #[derive(Debug)]
 enum Entry {
@@ -84,7 +91,7 @@ enum Entry {
 
 #[derive(Debug, Default)]
 struct LocalStore {
-    blob_store: Mutex<HashMap<DStoreId, Entry>>,
+    m: Mutex<HashMap<DStoreId, Entry>>,
 }
 
 // is the local store simple iff we require an extra call to decrement ref?
@@ -92,8 +99,8 @@ struct LocalStore {
 impl LocalStore {
     fn reserve(&self, key: DStoreId) {
         let (tx, _) = broadcast::channel(1);
-        let mut blob_store = self.blob_store.lock().unwrap();
-        blob_store.insert(
+        let mut m = self.m.lock().unwrap();
+        m.insert(
             key,
             Entry::Watch {
                 tx,
@@ -111,7 +118,7 @@ impl LocalStore {
 
         let t: Arc<dyn ValueTrait> = Arc::new(t);
 
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
 
         let new_ref_count;
         match m.entry(key.clone()) {
@@ -156,7 +163,7 @@ impl LocalStore {
         counter!("local_store::get_or_watch").increment(1);
 
         let mut rx = {
-            let mut m = self.blob_store.lock().unwrap();
+            let mut m = self.m.lock().unwrap();
             let rx = match m.entry(key) {
                 HashMapEntry::Vacant(_) => return Err(Error::System),
                 HashMapEntry::Occupied(mut o) => {
@@ -196,7 +203,7 @@ impl LocalStore {
     async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
         counter!("local_store::share").increment(1);
 
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
         match m.get_mut(&key).unwrap() {
             Entry::Watch { ref_count, .. } | Entry::Here { ref_count, .. } => {
                 *ref_count += n;
@@ -208,7 +215,7 @@ impl LocalStore {
     async fn decrement_or_remove(&self, key: &DStoreId, by: u64) -> bool {
         counter!("local_store::decrement_or_remove").increment(1);
 
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
         let mut remove = false;
 
         match m.get_mut(&key).unwrap() {
@@ -228,7 +235,7 @@ impl LocalStore {
     }
 
     fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
         let mut remove = Vec::new();
         for k in m.keys() {
             if k.address == address && k.lifetime_id < new_lifetime_id {
@@ -241,7 +248,7 @@ impl LocalStore {
     }
 
     fn task_failure(&self, address: &str, new_lifetime_id: u64, task_id: u64) {
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
         let mut remove = Vec::new();
         for k in m.keys() {
             if k.address == address && k.lifetime_id == new_lifetime_id && k.task_id == task_id {
@@ -256,7 +263,7 @@ impl LocalStore {
     fn clear(&self) {
         counter!("local_store::clear").increment(1);
 
-        let mut m = self.blob_store.lock().unwrap();
+        let mut m = self.m.lock().unwrap();
         for e in m.values() {
             match e {
                 Entry::Watch { tx, .. } => {
@@ -390,8 +397,7 @@ impl DStoreClient {
             .lock()
             .unwrap()
             .get(address)
-            .map(|client| client.clone())
-            .clone();
+            .map(|client| client.clone());
 
         match maybe_client {
             Some(client) => client,
@@ -469,12 +475,18 @@ impl DStoreClient {
 
     pub(crate) async fn decrement_or_remove(&self, key: DStoreId, by: u64) -> Result<(), Error> {
         let mut client = self.get_or_connect(&key.address).await;
+        let DStoreId {
+            address,
+            lifetime_id,
+            task_id,
+            object_id,
+        } = key;
         let _ = client
             .decrement_or_remove(DecrementOrRemoveRequest {
-                address: key.address,
-                lifetime_id: key.lifetime_id,
-                task_id: key.task_id,
-                object_id: key.object_id,
+                address,
+                lifetime_id,
+                task_id,
+                object_id,
                 by,
             })
             .await
@@ -482,6 +494,8 @@ impl DStoreClient {
         return Ok(());
     }
 }
+
+const LIFE_TIME_TOO_OLD: &str = "Lifetime too old.";
 
 #[tonic::async_trait]
 impl DStoreService for Arc<DStore> {
@@ -497,7 +511,7 @@ impl DStoreService for Arc<DStore> {
         } = request.into_inner();
 
         if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
-            return Err(Status::not_found("Lifetime too old".to_string()));
+            return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
         }
 
         let id = DStoreId {
@@ -511,7 +525,7 @@ impl DStoreService for Arc<DStore> {
             .local_store
             .get_or_watch(id.clone())
             .await
-            .map_err(|_| Status::not_found("DFut canceled."))?;
+            .map_err(|_| Status::not_found(""))?;
 
         let b = bincode::serialize(t.as_serialize()).unwrap();
         Ok(Response::new(GetOrWatchResponse { object: b }))
@@ -530,7 +544,7 @@ impl DStoreService for Arc<DStore> {
         } = request.into_inner();
 
         if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
-            return Err(Status::not_found("Lifetime too old".to_string()));
+            return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
         }
 
         let id = DStoreId {
@@ -558,7 +572,7 @@ impl DStoreService for Arc<DStore> {
         } = request.into_inner();
 
         if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
-            return Err(Status::not_found("Lifetime too old".to_string()));
+            return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
         }
 
         let removed = self
