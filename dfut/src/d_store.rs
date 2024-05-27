@@ -73,39 +73,48 @@ impl From<DoWorkResponse> for DStoreId {
     }
 }
 
-// TODO: Should we store errors in the d store?
+#[derive(Debug, Clone)]
+pub(crate) struct ParentInfo {
+    pub(crate) address: String,
+    pub(crate) lifetime_id: u64,
+    pub(crate) task_id: u64,
+}
+
 #[derive(Debug)]
-enum Entry {
+struct Value {
+    parent_info: Arc<ParentInfo>,
+    ref_count: u64,
+    value_state: ValueState,
+}
+
+#[derive(Debug)]
+enum ValueState {
     Watch {
         tx: broadcast::Sender<Option<Arc<dyn ValueTrait>>>,
         subscribers: u64,
-        ref_count: u64,
     },
-    // TODO: we can store Box<dyn Any> and lazy encode then store the Vec<u8>.
-    // This means we avoid encode/decode in the local work case.
     Here {
         t: Arc<dyn ValueTrait>,
-        ref_count: u64,
     },
 }
 
 #[derive(Debug, Default)]
 struct LocalStore {
-    m: Mutex<HashMap<DStoreId, Entry>>,
+    m: Mutex<HashMap<DStoreId, Value>>,
 }
 
 // is the local store simple iff we require an extra call to decrement ref?
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
-    fn reserve(&self, key: DStoreId) {
+    fn reserve(&self, parent_info: Arc<ParentInfo>, key: DStoreId) {
         let (tx, _) = broadcast::channel(1);
         let mut m = self.m.lock().unwrap();
         m.insert(
             key,
-            Entry::Watch {
-                tx,
-                subscribers: 0,
+            Value {
+                parent_info,
                 ref_count: 1,
+                value_state: ValueState::Watch { tx, subscribers: 0 },
             },
         );
     }
@@ -120,16 +129,19 @@ impl LocalStore {
 
         let mut m = self.m.lock().unwrap();
 
+        let parent_info;
         let new_ref_count;
         match m.entry(key.clone()) {
             HashMapEntry::Occupied(o) => {
-                let (tx, subscribers, ref_count) = match o.remove() {
-                    Entry::Watch {
-                        tx,
-                        subscribers,
-                        ref_count,
-                    } => (tx, subscribers, ref_count),
-                    _ => return Err(Error::System),
+                let (ref_count, tx, subscribers) = {
+                    let value = o.remove();
+                    match value.value_state {
+                        ValueState::Watch { tx, subscribers } => {
+                            parent_info = value.parent_info;
+                            (value.ref_count, tx, subscribers)
+                        }
+                        _ => return Err(Error::System),
+                    }
                 };
                 // subscribers must be less than or equal to ref_count.
                 if subscribers > 0 && subscribers == ref_count {
@@ -150,9 +162,10 @@ impl LocalStore {
 
         m.insert(
             key,
-            Entry::Here {
-                t,
+            Value {
+                parent_info,
                 ref_count: new_ref_count,
+                value_state: ValueState::Here { t },
             },
         );
 
@@ -168,13 +181,14 @@ impl LocalStore {
                 HashMapEntry::Vacant(_) => return Err(Error::System),
                 HashMapEntry::Occupied(mut o) => {
                     let mut remove = false;
-                    match o.get_mut() {
-                        Entry::Watch { subscribers, .. } => {
+                    let value = o.get_mut();
+                    match &mut value.value_state {
+                        ValueState::Watch { subscribers, .. } => {
                             *subscribers += 1;
                         }
-                        Entry::Here { t, ref_count } => {
-                            *ref_count -= 1;
-                            if *ref_count == 0 {
+                        ValueState::Here { t, .. } => {
+                            value.ref_count -= 1;
+                            if value.ref_count == 0 {
                                 remove = true;
                             } else {
                                 return Ok(Arc::clone(&t));
@@ -182,13 +196,13 @@ impl LocalStore {
                         }
                     }
                     if remove {
-                        match o.remove() {
-                            Entry::Here { t, .. } => return Ok(t),
+                        match o.remove().value_state {
+                            ValueState::Here { t, .. } => return Ok(t),
                             _ => panic!(),
                         }
                     }
-                    match o.get() {
-                        Entry::Watch { tx, .. } => tx.subscribe(),
+                    match &o.get().value_state {
+                        ValueState::Watch { tx, .. } => tx.subscribe(),
                         _ => panic!(),
                     }
                 }
@@ -204,11 +218,8 @@ impl LocalStore {
         counter!("local_store::share").increment(1);
 
         let mut m = self.m.lock().unwrap();
-        match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } | Entry::Here { ref_count, .. } => {
-                *ref_count += n;
-            }
-        }
+        let value = m.get_mut(&key).unwrap();
+        value.ref_count += n;
         Ok(())
     }
 
@@ -218,13 +229,11 @@ impl LocalStore {
         let mut m = self.m.lock().unwrap();
         let mut remove = false;
 
-        match m.get_mut(&key).unwrap() {
-            Entry::Watch { ref_count, .. } | Entry::Here { ref_count, .. } => {
-                *ref_count -= by;
-                if *ref_count == 0 {
-                    remove = true;
-                }
-            }
+        let value = m.get_mut(&key).unwrap();
+
+        value.ref_count -= by;
+        if value.ref_count == 0 {
+            remove = true;
         }
 
         if remove {
@@ -236,27 +245,36 @@ impl LocalStore {
 
     fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
         let mut m = self.m.lock().unwrap();
+
         let mut remove = Vec::new();
-        for k in m.keys() {
-            if k.address == address && k.lifetime_id < new_lifetime_id {
-                remove.push(k.clone());
+        for (id, entry) in m.iter() {
+            if entry.parent_info.address == address
+                && entry.parent_info.lifetime_id < new_lifetime_id
+            {
+                remove.push(id.clone());
             }
         }
-        for k in remove {
-            m.remove(&k);
+
+        for id in remove {
+            m.remove(&id);
         }
     }
 
     fn task_failure(&self, address: &str, new_lifetime_id: u64, task_id: u64) {
         let mut m = self.m.lock().unwrap();
+
         let mut remove = Vec::new();
-        for k in m.keys() {
-            if k.address == address && k.lifetime_id == new_lifetime_id && k.task_id == task_id {
-                remove.push(k.clone());
+        for (id, entry) in m.iter() {
+            if entry.parent_info.address == address
+                && entry.parent_info.lifetime_id == new_lifetime_id
+                && entry.parent_info.task_id == task_id
+            {
+                remove.push(id.clone());
             }
         }
-        for k in remove {
-            m.remove(&k);
+
+        for id in remove {
+            m.remove(&id);
         }
     }
 
@@ -265,11 +283,11 @@ impl LocalStore {
 
         let mut m = self.m.lock().unwrap();
         for e in m.values() {
-            match e {
-                Entry::Watch { tx, .. } => {
+            match &e.value_state {
+                ValueState::Watch { tx, .. } => {
                     tx.send(None).unwrap();
                 }
-                Entry::Here { .. } => {}
+                ValueState::Here { .. } => {}
             }
         }
         m.clear();
@@ -298,14 +316,14 @@ impl DStore {
         }
     }
 
-    pub(crate) fn take_next_id(&self, task_id: u64) -> DStoreId {
+    pub(crate) fn take_next_id(&self, parent_info: Arc<ParentInfo>, task_id: u64) -> DStoreId {
         let key = DStoreId {
             address: self.current_address.clone(),
             lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
             task_id,
             object_id: self.next_object_id.fetch_add(1, Ordering::SeqCst),
         };
-        self.local_store.reserve(key.clone());
+        self.local_store.reserve(parent_info, key.clone());
         key
     }
 

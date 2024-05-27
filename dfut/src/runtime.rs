@@ -15,7 +15,7 @@ use tonic::transport::{Channel, Endpoint, Server};
 use crate::{
     d_fut::{DFut, InnerDFut},
     d_scheduler::DScheduler,
-    d_store::{DStore, DStoreClient, DStoreId, ValueTrait},
+    d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
     peer_work::PeerWorkerClient,
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
@@ -351,13 +351,6 @@ struct InnerRuntime {
     timer: Timer,
 }
 
-#[derive(Debug, Clone)]
-struct ParentInfo {
-    address: String,
-    lifetime_id: u64,
-    task_id: u64,
-}
-
 pub enum Where {
     Remote { address: String },
     Local,
@@ -663,6 +656,7 @@ impl Runtime {
                 let t = match fut.await {
                     Ok(t) => t,
                     Err(Error::System) => {
+                        // TODO cleanup d store id
                         let mut failed_local_tasks =
                             rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
                         if rt.lifetime_id
@@ -699,7 +693,6 @@ impl Runtime {
 
                 // TODO: check parent lifeitime id vs rt.parent_info.lifeitime
 
-                // TODO: pass owner info to d_store to allow for parent based cleanup.
                 rt.shared_runtime_state
                     .d_store
                     .publish(d_store_id, t)
@@ -727,7 +720,10 @@ impl Runtime {
     }
 
     fn next_d_store_id(&self) -> DStoreId {
-        self.shared_runtime_state.d_store.take_next_id(self.task_id)
+        // TODO: pass owner info to d_store to allow for parent based cleanup.
+        self.shared_runtime_state
+            .d_store
+            .take_next_id(Arc::clone(&self.parent_info), self.task_id)
     }
 
     // TODO: it is possible that the global scheduler routes the work back to
