@@ -22,7 +22,7 @@ struct Stats {
     fn_stats: HashMap<String, FnStats>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct DScheduler {
     // TODO: When it is fun performance time we move this out of a mutex and
     // use a lock free data structure. We don't have any benchmarks/analysis to
@@ -31,12 +31,6 @@ pub(crate) struct DScheduler {
 }
 
 impl DScheduler {
-    pub(crate) fn new() -> Self {
-        Self {
-            stats: Mutex::default(),
-        }
-    }
-
     pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.

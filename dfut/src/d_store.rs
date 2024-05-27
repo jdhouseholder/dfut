@@ -227,6 +227,32 @@ impl LocalStore {
         remove
     }
 
+    fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
+        let mut m = self.blob_store.lock().unwrap();
+        let mut remove = Vec::new();
+        for k in m.keys() {
+            if k.address == address && k.lifetime_id < new_lifetime_id {
+                remove.push(k.clone());
+            }
+        }
+        for k in remove {
+            m.remove(&k);
+        }
+    }
+
+    fn task_failure(&self, address: &str, new_lifetime_id: u64, task_id: u64) {
+        let mut m = self.blob_store.lock().unwrap();
+        let mut remove = Vec::new();
+        for k in m.keys() {
+            if k.address == address && k.lifetime_id == new_lifetime_id && k.task_id == task_id {
+                remove.push(k.clone());
+            }
+        }
+        for k in remove {
+            m.remove(&k);
+        }
+    }
+
     fn clear(&self) {
         counter!("local_store::clear").increment(1);
 
@@ -322,12 +348,13 @@ impl DStore {
         Ok(())
     }
 
-    pub(crate) fn worker_failure(&self, _address: &str, _lifetime_id: u64) {
-        todo!()
+    pub(crate) fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
+        self.local_store.worker_failure(address, new_lifetime_id);
     }
 
-    pub(crate) fn task_failure(&self, _address: &str, _lifetime_id: u64, _task_id: u64) {
-        todo!()
+    pub(crate) fn task_failure(&self, address: &str, new_lifetime_id: u64, task_id: u64) {
+        self.local_store
+            .task_failure(address, new_lifetime_id, task_id);
     }
 
     pub(crate) fn clear(&self) {

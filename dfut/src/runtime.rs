@@ -98,7 +98,7 @@ impl RootRuntime {
                 dfut_retries: DFUT_RETRIES,
 
                 global_scheduler,
-                d_scheduler: DScheduler::new(),
+                d_scheduler: DScheduler::default(),
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store,
                 lifetime_list_id: AtomicU64::new(0),
@@ -225,18 +225,50 @@ impl RootRuntime {
             }
 
             if lifetime_list_id > local_lifetime_list_id {
-                *self.shared_runtime_state.lifetimes.lock().unwrap() = lifetimes;
+                let mut current_lifetimes = self.shared_runtime_state.lifetimes.lock().unwrap();
+                for (address, lifetime_id) in &lifetimes {
+                    if let Some(local_lifetime_id) = current_lifetimes.get(address) {
+                        if lifetime_id < local_lifetime_id {
+                            self.shared_runtime_state
+                                .d_store
+                                .worker_failure(address, *lifetime_id);
+                        }
+                    }
+                }
+                *current_lifetimes = lifetimes;
             }
 
             {
-                let mut failed_remote_tasks = self
+                let mut current_failed_remote_tasks = self
                     .shared_runtime_state
                     .failed_remote_tasks
                     .lock()
                     .unwrap();
-                if *failed_remote_tasks != failed_tasks {
-                    // TODO: clear d_store
-                    *failed_remote_tasks = failed_tasks;
+                if *current_failed_remote_tasks != failed_tasks {
+                    for (address, tasks) in &failed_tasks {
+                        if let Some(local_falied_remote_tasks) =
+                            current_failed_remote_tasks.get(address)
+                        {
+                            for task_id in &tasks.task_id {
+                                if !local_falied_remote_tasks.task_id.contains(task_id) {
+                                    self.shared_runtime_state.d_store.task_failure(
+                                        address,
+                                        lifetime_id,
+                                        *task_id,
+                                    );
+                                }
+                            }
+                        } else {
+                            for task_id in &tasks.task_id {
+                                self.shared_runtime_state.d_store.task_failure(
+                                    address,
+                                    lifetime_id,
+                                    *task_id,
+                                );
+                            }
+                        }
+                    }
+                    *current_failed_remote_tasks = failed_tasks;
                 }
             }
 

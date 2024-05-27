@@ -77,9 +77,9 @@ impl GlobalScheduler {
         // On commit: remove addresses that have expired from fn_availability.
     }
 
-    pub async fn serve(address: &str, _peers: Vec<String>) {
+    pub async fn serve(address: &str, _peers: Vec<String>, lifetime_timeout: Duration) {
         let global_scheduler = Arc::new(Self {
-            lifetime_timeout: Duration::from_secs(5),
+            lifetime_timeout,
             ..Default::default()
         });
         let address = address
