@@ -87,9 +87,9 @@ impl DScheduler {
     }
 
     pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {
-        let mut stats = self.stats.lock().unwrap();
-
-        stats
+        self.stats
+            .lock()
+            .unwrap()
             .fn_stats
             .entry(fn_name.to_string())
             .or_default()

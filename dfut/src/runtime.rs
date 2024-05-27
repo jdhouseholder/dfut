@@ -419,7 +419,13 @@ impl Runtime {
                     let d_store_id = self
                         .shared_runtime_state
                         .peer_worker_client
-                        .do_work(&address, self.task_id, work.clone())
+                        .do_work(
+                            &self.shared_runtime_state.local_server_address,
+                            self.lifetime_id,
+                            self.task_id,
+                            &address,
+                            work.clone(),
+                        )
                         .await;
                     let t: DResult<T> = self
                         .shared_runtime_state
@@ -722,7 +728,13 @@ impl Runtime {
         let d_store_id = self
             .shared_runtime_state
             .peer_worker_client
-            .do_work(&address, self.task_id, work.clone())
+            .do_work(
+                &self.shared_runtime_state.local_server_address,
+                self.lifetime_id,
+                self.task_id,
+                &address,
+                work.clone(),
+            )
             .await;
 
         self.track_call(d_store_id.clone(), Call::Remote { work });
@@ -869,10 +881,14 @@ impl RuntimeClient {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         };
+        let (client_id, lifetime_id) = {
+            let shared = self.shared.lock().unwrap();
+            (shared.client_id.clone(), shared.lifetime_id)
+        };
         let d_store_id = self
             .peer_worker_client
             .clone()
-            .do_work(&address, task_id, w)
+            .do_work(&client_id, lifetime_id, task_id, &address, w)
             .await;
         d_store_id.into()
     }

@@ -39,7 +39,14 @@ impl PeerWorkerClient {
         panic!();
     }
 
-    pub(crate) async fn do_work(&self, address: &str, task_id: u64, w: Work) -> DStoreId {
+    pub(crate) async fn do_work(
+        &self,
+        current_address: &str,
+        current_lifetime_id: u64,
+        current_task_id: u64,
+        address: &str,
+        w: Work,
+    ) -> DStoreId {
         let maybe_client = {
             self.worker_service_client_cache
                 .lock()
@@ -61,6 +68,7 @@ impl PeerWorkerClient {
                 client
             }
         };
+
         let DoWorkResponse {
             address,
             lifetime_id,
@@ -68,15 +76,16 @@ impl PeerWorkerClient {
             object_id,
         } = client
             .do_work(DoWorkRequest {
-                parent_address: "TODO".to_string(),
-                parent_lifetime_id: 1,
-                parent_task_id: task_id,
+                parent_address: current_address.to_string(),
+                parent_lifetime_id: current_lifetime_id,
+                parent_task_id: current_task_id,
                 fn_name: w.fn_name,
                 args: w.args,
             })
             .await
             .unwrap()
             .into_inner();
+
         DStoreId {
             address,
             lifetime_id,
