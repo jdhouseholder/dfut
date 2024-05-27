@@ -14,13 +14,7 @@ use tonic::transport::{Channel, Endpoint, Server};
 
 use crate::{
     d_fut::{DFut, InnerDFut},
-    d_scheduler::{
-        worker_service::{
-            worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
-            DoWorkResponse,
-        },
-        DScheduler, DSchedulerClient,
-    },
+    d_scheduler::DScheduler,
     d_store::{
         d_store_service::d_store_service_server::DStoreServiceServer, DStore, DStoreClient,
         DStoreId, ValueTrait,
@@ -28,7 +22,14 @@ use crate::{
     global_scheduler::global_scheduler_service::{
         global_scheduler_service_client::GlobalSchedulerServiceClient, FailedTasks,
         HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
-        RegisterResponse, Stats,
+        RegisterRequest, RegisterResponse, Stats,
+    },
+    peer_work::{
+        worker_service::{
+            worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
+            DoWorkResponse,
+        },
+        PeerWorkerClient,
     },
     timer::Timer,
     work::{IntoWork, Work},
@@ -42,7 +43,9 @@ struct SharedRuntimeState {
     local_server_address: String,
     dfut_retries: usize,
 
+    global_scheduler: GlobalSchedulerServiceClient<Channel>,
     d_scheduler: DScheduler,
+    peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
     lifetime_list_id: AtomicU64,
     lifetimes: Mutex<HashMap<String, u64>>,
@@ -67,16 +70,21 @@ impl RootRuntime {
         global_scheduler_address: &str,
         fn_names: Vec<String>,
     ) -> Self {
-        let d_scheduler = DScheduler::new(&global_scheduler_address).await;
+        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut global_scheduler = Self::gs_connect(endpoint).await;
 
         let RegisterResponse {
             lifetime_id,
             heart_beat_timeout,
             ..
-        } = d_scheduler
-            .register(local_server_address, fn_names)
+        } = global_scheduler
+            .register(RegisterRequest {
+                address: local_server_address.to_string(),
+                fn_names,
+            })
             .await
-            .unwrap();
+            .unwrap()
+            .into_inner();
 
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
         let next_task_id = AtomicU64::new(0);
@@ -89,7 +97,9 @@ impl RootRuntime {
                 // TODO: pass in through config
                 dfut_retries: DFUT_RETRIES,
 
-                d_scheduler,
+                global_scheduler,
+                d_scheduler: DScheduler::new(),
+                peer_worker_client: PeerWorkerClient::new(),
                 d_store,
                 lifetime_list_id: AtomicU64::new(0),
                 lifetimes: Mutex::default(),
@@ -104,6 +114,16 @@ impl RootRuntime {
 
             heart_beat_timeout,
         }
+    }
+
+    async fn gs_connect(endpoint: Endpoint) -> GlobalSchedulerServiceClient<Channel> {
+        for i in 0..5 {
+            if let Ok(client) = GlobalSchedulerServiceClient::connect(endpoint.clone()).await {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
+        }
+        panic!();
     }
 
     fn new_child(
@@ -145,7 +165,12 @@ impl RootRuntime {
         let runtime = self.new_child(parent_address, parent_lifetime_id, parent_task_id);
         let fut = f(runtime.clone());
         let d_store_id = runtime.do_local_work(fn_name, fut);
-        d_store_id.into()
+        DoWorkResponse {
+            address: d_store_id.address,
+            lifetime_id: d_store_id.lifetime_id,
+            task_id: d_store_id.task_id,
+            object_id: d_store_id.object_id,
+        }
     }
 
     async fn heart_beat_forever(&self) {
@@ -177,15 +202,18 @@ impl RootRuntime {
                 ..
             } = self
                 .shared_runtime_state
-                .d_scheduler
-                .heart_beat(
-                    &self.shared_runtime_state.local_server_address,
-                    local_lifetime_id,
-                    local_lifetime_list_id,
-                    failed_local_tasks,
-                )
+                .global_scheduler
+                .clone()
+                .heart_beat(HeartBeatRequest {
+                    address: self.shared_runtime_state.local_server_address.to_string(),
+                    lifetime_id: local_lifetime_id,
+                    lifetime_list_id: local_lifetime_list_id,
+                    failed_tasks: failed_local_tasks,
+                    ..Default::default()
+                })
                 .await
-                .unwrap();
+                .unwrap()
+                .into_inner();
 
             let i = worker_stats_to_index(stats);
             {
@@ -390,7 +418,7 @@ impl Runtime {
                     };
                     let d_store_id = self
                         .shared_runtime_state
-                        .d_scheduler
+                        .peer_worker_client
                         .do_work(&address, self.task_id, work.clone())
                         .await;
                     let t: DResult<T> = self
@@ -693,7 +721,7 @@ impl Runtime {
         // TODO: make sure this has the current runtime and track the ownership.
         let d_store_id = self
             .shared_runtime_state
-            .d_scheduler
+            .peer_worker_client
             .do_work(&address, self.task_id, work.clone())
             .await;
 
@@ -743,65 +771,11 @@ struct SharedRuntimeClientState {
     fn_name_to_addresses: FnIndex,
 }
 
-async fn gs_connect(endpoint: Endpoint) -> GlobalSchedulerServiceClient<Channel> {
-    for i in 0..5 {
-        if let Ok(client) = GlobalSchedulerServiceClient::connect(endpoint.clone()).await {
-            return client;
-        }
-        tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
-    }
-    panic!();
-}
-
-async fn heart_beat(global_scheduler_address: &str, shared: Arc<Mutex<SharedRuntimeClientState>>) {
-    let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-    let mut global_scheduler = gs_connect(endpoint).await;
-
-    let RegisterClientResponse {
-        client_id,
-        lifetime_id,
-        heart_beat_timeout,
-        ..
-    } = global_scheduler
-        .register_client(RegisterClientRequest {})
-        .await
-        .unwrap()
-        .into_inner();
-    {
-        let mut shared = shared.lock().unwrap();
-        shared.client_id = client_id;
-        shared.lifetime_id = lifetime_id;
-    }
-    let sleep_for = Duration::from_secs(heart_beat_timeout / 3);
-    loop {
-        let (client_id, lifetime_id) = {
-            let shared = shared.lock().unwrap();
-            (shared.client_id.clone(), shared.lifetime_id)
-        };
-        let HeartBeatResponse { stats, .. } = global_scheduler
-            .heart_beat(HeartBeatRequest {
-                address: client_id,
-                lifetime_id,
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .into_inner();
-
-        let i = worker_stats_to_index(stats);
-        {
-            shared.lock().unwrap().fn_name_to_addresses = i;
-        }
-
-        tokio::time::sleep(sleep_for).await;
-    }
-}
-
 // TODO: Runtime clients need to heartbeat with the global scheduler.
 // They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
 pub struct RuntimeClient {
     shared: Arc<Mutex<SharedRuntimeClientState>>,
-    d_scheduler_client: DSchedulerClient,
+    peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 }
 
@@ -811,12 +785,69 @@ impl RuntimeClient {
         tokio::spawn({
             let global_scheduler_address = global_scheduler_address.to_string();
             let shared = Arc::clone(&shared);
-            async move { heart_beat(&global_scheduler_address, shared).await }
+            async move { Self::heart_beat(&global_scheduler_address, shared).await }
         });
         Self {
             shared,
-            d_scheduler_client: DSchedulerClient::new(global_scheduler_address).await,
+            peer_worker_client: PeerWorkerClient::new(),
             d_store_client: DStoreClient::new(),
+        }
+    }
+
+    async fn gs_connect(endpoint: Endpoint) -> GlobalSchedulerServiceClient<Channel> {
+        for i in 0..5 {
+            if let Ok(client) = GlobalSchedulerServiceClient::connect(endpoint.clone()).await {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
+        }
+        panic!();
+    }
+
+    async fn heart_beat(
+        global_scheduler_address: &str,
+        shared: Arc<Mutex<SharedRuntimeClientState>>,
+    ) {
+        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut global_scheduler = Self::gs_connect(endpoint).await;
+
+        let RegisterClientResponse {
+            client_id,
+            lifetime_id,
+            heart_beat_timeout,
+            ..
+        } = global_scheduler
+            .register_client(RegisterClientRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        {
+            let mut shared = shared.lock().unwrap();
+            shared.client_id = client_id;
+            shared.lifetime_id = lifetime_id;
+        }
+        let sleep_for = Duration::from_secs(heart_beat_timeout / 3);
+        loop {
+            let (client_id, lifetime_id) = {
+                let shared = shared.lock().unwrap();
+                (shared.client_id.clone(), shared.lifetime_id)
+            };
+            let HeartBeatResponse { stats, .. } = global_scheduler
+                .heart_beat(HeartBeatRequest {
+                    address: client_id,
+                    lifetime_id,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+
+            let i = worker_stats_to_index(stats);
+            {
+                shared.lock().unwrap().fn_name_to_addresses = i;
+            }
+
+            tokio::time::sleep(sleep_for).await;
         }
     }
 
@@ -838,7 +869,11 @@ impl RuntimeClient {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         };
-        let d_store_id = self.d_scheduler_client.do_work(&address, task_id, w).await;
+        let d_store_id = self
+            .peer_worker_client
+            .clone()
+            .do_work(&address, task_id, w)
+            .await;
         d_store_id.into()
     }
 

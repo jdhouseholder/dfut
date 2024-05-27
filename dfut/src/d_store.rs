@@ -15,7 +15,7 @@ use tonic::{
     Request, Response, Status,
 };
 
-use crate::{d_scheduler::worker_service::DoWorkResponse, Error};
+use crate::{peer_work::worker_service::DoWorkResponse, Error};
 
 pub(crate) mod d_store_service {
     tonic::include_proto!("d_store_service");
