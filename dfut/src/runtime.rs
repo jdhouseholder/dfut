@@ -700,10 +700,8 @@ impl Runtime {
 
                 // TODO: check parent lifeitime id vs rt.parent_info.lifeitime
 
-                rt.shared_runtime_state
-                    .d_store
-                    .publish(d_store_id, t)
-                    .unwrap();
+                // If the entry was removed then publish will fail. So we can ignore the Error.
+                let _ = rt.shared_runtime_state.d_store.publish(d_store_id, t);
             }
         });
 

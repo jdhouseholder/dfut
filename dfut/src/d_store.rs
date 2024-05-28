@@ -146,12 +146,12 @@ impl LocalStore {
                 // subscribers must be less than or equal to ref_count.
                 if subscribers > 0 && subscribers == ref_count {
                     // All refs are currently subscribed. We can't have any new gets or shares.
-                    tx.send(Some(t)).unwrap();
+                    let _ = tx.send(Some(t));
                     return Ok(());
                 }
                 // There are still outstanding refs, we need to store.
                 if subscribers > 0 {
-                    tx.send(Some(Arc::clone(&t))).unwrap();
+                    let _ = tx.send(Some(Arc::clone(&t)));
                 }
                 new_ref_count = ref_count - subscribers;
             }
