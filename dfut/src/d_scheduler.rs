@@ -5,6 +5,12 @@ use std::time::Duration;
 use metrics::counter;
 
 const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
+                                             //
+#[derive(Debug)]
+pub enum Where {
+    Remote { address: String },
+    Local,
+}
 
 #[derive(Debug, Default, Clone)]
 struct FnStats {
@@ -31,7 +37,7 @@ pub(crate) struct DScheduler {
 }
 
 impl DScheduler {
-    pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> bool {
+    pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Where {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
         let last_stats = {
@@ -77,7 +83,14 @@ impl DScheduler {
              "choice" => if local { "local" } else { "remote" },
         )
         .increment(1);
-        local
+
+        if local {
+            Where::Local
+        } else {
+            Where::Remote {
+                address: "TODO: decide peer here.".to_string(),
+            }
+        }
     }
 
     pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {

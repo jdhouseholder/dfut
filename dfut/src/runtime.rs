@@ -14,7 +14,7 @@ use tonic::transport::{Channel, Endpoint, Server};
 
 use crate::{
     d_fut::{DFut, InnerDFut},
-    d_scheduler::DScheduler,
+    d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
     peer_work::PeerWorkerClient,
     services::{
@@ -354,11 +354,6 @@ struct InnerRuntime {
     timer: Timer,
 }
 
-pub enum Where {
-    Remote { address: String },
-    Local,
-}
-
 #[derive(Debug, Clone)]
 pub struct Runtime {
     shared_runtime_state: Arc<SharedRuntimeState>,
@@ -616,17 +611,9 @@ impl Runtime {
     }
 
     pub fn schedule_work(&self, fn_name: &str, arg_size: usize) -> Where {
-        let local = self
-            .shared_runtime_state
+        self.shared_runtime_state
             .d_scheduler
-            .accept_local_work(fn_name, arg_size);
-        if local {
-            Where::Local
-        } else {
-            Where::Remote {
-                address: "TODO: decide peer here.".to_string(),
-            }
-        }
+            .accept_local_work(fn_name, arg_size)
     }
 
     // Can we use https://docs.rs/tokio-metrics/0.3.1/tokio_metrics/ to make decisions?
