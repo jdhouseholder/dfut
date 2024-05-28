@@ -52,7 +52,7 @@ message HeartBeatRequest {
 
 message FailedTasks {
 	fixed64 lifetime_id = 2;
-	repeated fixed64 task_id = 3;
+	repeated fixed64 task_ids = 3;
 }
 
 message HeartBeatResponse {

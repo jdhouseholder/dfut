@@ -250,8 +250,8 @@ impl RootRuntime {
                         if let Some(local_falied_remote_tasks) =
                             current_failed_remote_tasks.get(address)
                         {
-                            for task_id in &tasks.task_id {
-                                if !local_falied_remote_tasks.task_id.contains(task_id) {
+                            for task_id in &tasks.task_ids {
+                                if !local_falied_remote_tasks.task_ids.contains(task_id) {
                                     self.shared_runtime_state.d_store.task_failure(
                                         address,
                                         lifetime_id,
@@ -260,7 +260,7 @@ impl RootRuntime {
                                 }
                             }
                         } else {
-                            for task_id in &tasks.task_id {
+                            for task_id in &tasks.task_ids {
                                 self.shared_runtime_state.d_store.task_failure(
                                     address,
                                     lifetime_id,
@@ -686,7 +686,7 @@ impl Runtime {
                         rt.shared_runtime_state.failed_remote_tasks.lock().unwrap();
                     if let Some(failed_tasks) = failed_remote_tasks.get(&rt.parent_info.address) {
                         if rt.parent_info.lifetime_id == failed_tasks.lifetime_id
-                            && failed_tasks.task_id.contains(&rt.parent_info.task_id)
+                            && failed_tasks.task_ids.contains(&rt.parent_info.task_id)
                         {
                             rt.shared_runtime_state
                                 .failed_local_tasks

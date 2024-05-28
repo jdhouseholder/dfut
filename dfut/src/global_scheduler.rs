@@ -8,7 +8,7 @@ use tracing::error;
 
 use crate::services::global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
+    FailedTasks, FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
     RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, Stats,
 };
 
@@ -58,6 +58,7 @@ struct Lifetimes {
 struct InnerGlobalScheduler {
     stats: HashMap<String, Stats>,
     lifetimes: Lifetimes,
+    failed_tasks: HashMap<String, FailedTasks>,
     next_client_id: u64,
 }
 
@@ -157,17 +158,32 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<RegisterClientResponse>, Status> {
         let RegisterClientRequest {} = request.into_inner();
 
-        let id = {
-            let mut inner = self.inner.lock().unwrap();
-            let id = inner.next_client_id;
-            inner.next_client_id += 1;
-            id
+        let mut inner = self.inner.lock().unwrap();
+
+        let id = inner.next_client_id;
+        inner.next_client_id += 1;
+
+        let address = format!("client-id-{id}");
+
+        let lifetime_id = match inner.lifetimes.m.entry(address.clone()) {
+            Entry::Occupied(ref mut e) => {
+                let l = e.get_mut();
+                l.at = Instant::now();
+                l.id
+            }
+            Entry::Vacant(v) => {
+                v.insert(LifetimeLease {
+                    id: DEFAULT_LIFETIME_ID,
+                    at: Instant::now(),
+                });
+                DEFAULT_LIFETIME_ID
+            }
         };
 
         Ok(Response::new(RegisterClientResponse {
             leader_redirect: None,
-            client_id: format!("client-id-{id}"),
-            lifetime_id: 0,
+            client_id: address,
+            lifetime_id,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
         }))
     }
@@ -179,22 +195,30 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let HeartBeatRequest {
             address,
             lifetime_id,
-            lifetime_list_id,
+            mut lifetime_list_id,
+            failed_tasks,
             ..
         } = request.into_inner();
 
         let mut inner = self.inner.lock().unwrap();
 
-        if lifetime_list_id == inner.lifetimes.list_id {
-            return Ok(Response::new(HeartBeatResponse {
-                leader_redirect: None,
+        // TODO: new failed_tasks have a ttl of 2 * HBTO and can then be removed.
+        // TODO: use low watermark from worker to avoid having to failed_tasks forever.
+        let e = inner
+            .failed_tasks
+            .entry(address.clone())
+            .or_insert_with(|| FailedTasks {
                 lifetime_id,
-                lifetime_list_id: inner.lifetimes.list_id,
-                lifetimes: HashMap::new(),
-                stats: inner.stats.clone(),
-                failed_tasks: HashMap::new(),
-            }));
+                task_ids: Vec::new(),
+            });
+
+        if e.lifetime_id < lifetime_id {
+            e.task_ids.clear();
         }
+
+        e.task_ids.extend(failed_tasks);
+        // TODO: store in hashmap, but ok for now.
+        e.task_ids.dedup();
 
         let lifetime_id = match inner.lifetimes.m.entry(address.clone()) {
             Entry::Occupied(ref mut o) => {
@@ -238,13 +262,17 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
         };
 
-        let lifetime_list_id = inner.lifetimes.list_id;
-        let lifetimes: HashMap<_, _> = inner
-            .lifetimes
-            .m
-            .iter()
-            .map(|(address, lifetime_lease)| (address.to_string(), lifetime_lease.id))
-            .collect();
+        let lifetimes = if inner.lifetimes.list_id != lifetime_list_id {
+            lifetime_list_id = inner.lifetimes.list_id;
+            inner
+                .lifetimes
+                .m
+                .iter()
+                .map(|(address, lifetime_lease)| (address.to_string(), lifetime_lease.id))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         Ok(Response::new(HeartBeatResponse {
             leader_redirect: None,
@@ -252,7 +280,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             lifetime_list_id,
             lifetimes,
             stats: inner.stats.clone(),
-            failed_tasks: HashMap::new(),
+            failed_tasks: inner.failed_tasks.clone(),
         }))
     }
 
