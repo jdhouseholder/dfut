@@ -14,7 +14,6 @@ use crate::services::global_scheduler_service::{
 };
 
 const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 10; // TODO: pass through config
-const DEFAULT_LIFETIME_ID: u64 = 1; // TODO: pass through config
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Proposal {
@@ -121,10 +120,10 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
             Entry::Vacant(v) => {
                 v.insert(LifetimeLease {
-                    id: DEFAULT_LIFETIME_ID,
+                    id: 0,
                     at: Instant::now(),
                 });
-                DEFAULT_LIFETIME_ID
+                0
             }
         };
 
@@ -174,10 +173,10 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
             Entry::Vacant(v) => {
                 v.insert(LifetimeLease {
-                    id: DEFAULT_LIFETIME_ID,
+                    id: 0,
                     at: Instant::now(),
                 });
-                DEFAULT_LIFETIME_ID
+                0
             }
         };
 
