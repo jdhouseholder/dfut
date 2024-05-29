@@ -20,9 +20,9 @@ use crate::{
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, FailedTasks,
+            global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
             HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
-            RegisterRequest, RegisterResponse, Stats,
+            RegisterRequest, RegisterResponse, RuntimeInfo, TaskFailure,
         },
         worker_service::{
             worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
@@ -45,15 +45,13 @@ struct SharedRuntimeState {
     d_scheduler: DScheduler,
     peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
-    lifetime_list_id: AtomicU64,
-    lifetimes: Mutex<HashMap<String, u64>>,
+
+    address_to_runtime_info: Mutex<HashMap<String, RuntimeInfo>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
 
     fn_name_to_addresses: Mutex<FnIndex>,
-
     failed_local_tasks: Mutex<Vec<u64>>,
-    failed_remote_tasks: Mutex<HashMap<String, FailedTasks>>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,15 +97,13 @@ impl RootRuntime {
                 d_scheduler: DScheduler::default(),
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store,
-                lifetime_list_id: AtomicU64::new(0),
-                lifetimes: Mutex::default(),
+
+                address_to_runtime_info: Mutex::default(),
                 lifetime_id,
                 next_task_id,
 
                 fn_name_to_addresses: Mutex::new(FnIndex::default()),
-
                 failed_local_tasks: Mutex::default(),
-                failed_remote_tasks: Mutex::default(),
             }),
 
             heart_beat_timeout,
@@ -180,12 +176,7 @@ impl RootRuntime {
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
-            let local_lifetime_list_id = self
-                .shared_runtime_state
-                .lifetime_list_id
-                .load(Ordering::SeqCst);
-
-            let failed_local_tasks = {
+            let failed_task_ids = {
                 self.shared_runtime_state
                     .failed_local_tasks
                     .lock()
@@ -196,10 +187,7 @@ impl RootRuntime {
             // TODO: retry & graceful fail.
             let HeartBeatResponse {
                 lifetime_id,
-                lifetime_list_id,
-                lifetimes,
-                failed_tasks,
-                stats,
+                address_to_runtime_info,
                 ..
             } = self
                 .shared_runtime_state
@@ -207,70 +195,71 @@ impl RootRuntime {
                 .clone()
                 .heart_beat(HeartBeatRequest {
                     address: self.shared_runtime_state.local_server_address.to_string(),
-                    lifetime_id: local_lifetime_id,
-                    lifetime_list_id: local_lifetime_list_id,
-                    failed_tasks: failed_local_tasks,
-                    ..Default::default()
+                    current_runtime_info: Some(CurrentRuntimeInfo {
+                        lifetime_id: local_lifetime_id,
+                        stats: None,
+                        failed_task_ids,
+                    }),
                 })
                 .await
                 .unwrap()
                 .into_inner();
 
-            let i = worker_stats_to_index(stats);
+            let fn_index = compute_fn_index(&address_to_runtime_info);
             {
                 *self
                     .shared_runtime_state
                     .fn_name_to_addresses
                     .lock()
-                    .unwrap() = i;
-            }
-
-            if lifetime_list_id > local_lifetime_list_id {
-                let mut current_lifetimes = self.shared_runtime_state.lifetimes.lock().unwrap();
-                for (address, lifetime_id) in &lifetimes {
-                    if let Some(local_lifetime_id) = current_lifetimes.get(address) {
-                        if lifetime_id < local_lifetime_id {
-                            self.shared_runtime_state
-                                .d_store
-                                .worker_failure(address, *lifetime_id);
-                        }
-                    }
-                }
-                *current_lifetimes = lifetimes;
+                    .unwrap() = fn_index;
             }
 
             {
-                let mut current_failed_remote_tasks = self
+                let mut previous_address_to_runtime_info = self
                     .shared_runtime_state
-                    .failed_remote_tasks
+                    .address_to_runtime_info
                     .lock()
                     .unwrap();
-                if *current_failed_remote_tasks != failed_tasks {
-                    for (address, tasks) in &failed_tasks {
-                        if let Some(local_falied_remote_tasks) =
-                            current_failed_remote_tasks.get(address)
-                        {
-                            for task_id in &tasks.task_ids {
-                                if !local_falied_remote_tasks.task_ids.contains(task_id) {
-                                    self.shared_runtime_state.d_store.task_failure(
-                                        address,
-                                        lifetime_id,
-                                        *task_id,
-                                    );
-                                }
-                            }
-                        } else {
-                            for task_id in &tasks.task_ids {
+
+                // worker_failure
+                for (address, runtime_info) in &address_to_runtime_info {
+                    if let Some(previous_runtime_info) =
+                        previous_address_to_runtime_info.get(address)
+                    {
+                        if previous_runtime_info.lifetime_id < runtime_info.lifetime_id {
+                            self.shared_runtime_state
+                                .d_store
+                                .worker_failure(address, runtime_info.lifetime_id);
+                        }
+                    }
+                }
+
+                // task_failure
+                for (address, runtime_info) in &address_to_runtime_info {
+                    if let Some(previous_runtime_info) =
+                        previous_address_to_runtime_info.get(address)
+                    {
+                        for task_failure in &runtime_info.task_failures {
+                            if !previous_runtime_info.task_failures.contains(&task_failure) {
                                 self.shared_runtime_state.d_store.task_failure(
                                     address,
-                                    lifetime_id,
-                                    *task_id,
+                                    task_failure.lifetime_id,
+                                    task_failure.task_id,
                                 );
                             }
                         }
+                    } else {
+                        for task_failure in &runtime_info.task_failures {
+                            self.shared_runtime_state.d_store.task_failure(
+                                address,
+                                task_failure.lifetime_id,
+                                task_failure.task_id,
+                            );
+                        }
                     }
-                    *current_failed_remote_tasks = failed_tasks;
                 }
+
+                *previous_address_to_runtime_info = address_to_runtime_info;
             }
 
             if lifetime_id != local_lifetime_id {
@@ -367,11 +356,11 @@ pub struct Runtime {
 impl Runtime {
     fn is_valid_id(&self, d_store_id: &DStoreId) -> Option<bool> {
         self.shared_runtime_state
-            .lifetimes
+            .address_to_runtime_info
             .lock()
             .unwrap()
             .get(&d_store_id.address)
-            .map(|v| d_store_id.lifetime_id >= *v)
+            .map(|v| d_store_id.lifetime_id >= v.lifetime_id)
     }
 
     fn start_timer(&self) -> Instant {
@@ -392,6 +381,33 @@ impl Runtime {
         elapsed
     }
 
+    fn check_runtime_state(&self) -> DResult<()> {
+        if self.lifetime_id != self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
+            return Err(Error::System);
+        }
+
+        if let Some(parent_runtime_info) = self
+            .shared_runtime_state
+            .address_to_runtime_info
+            .lock()
+            .unwrap()
+            .get(&self.parent_info.address)
+        {
+            if parent_runtime_info.lifetime_id < self.parent_info.lifetime_id {
+                return Err(Error::System);
+            }
+            if parent_runtime_info.lifetime_id == self.parent_info.lifetime_id
+                && parent_runtime_info.task_failures.contains(&TaskFailure {
+                    lifetime_id: self.parent_info.lifetime_id,
+                    task_id: self.parent_info.task_id,
+                })
+            {
+                return Err(Error::System);
+            }
+        }
+        Ok(())
+    }
+
     async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
@@ -400,6 +416,8 @@ impl Runtime {
             Sender(Work, Sender<Arc<dyn ValueTrait>>),
             Receiver(Receiver<Arc<dyn ValueTrait>>),
         }
+
+        self.check_runtime_state()?;
 
         let r = {
             let mut inner = self.inner.lock().unwrap();
@@ -429,6 +447,8 @@ impl Runtime {
         match r {
             RetryState::Sender(work, tx) => {
                 for _ in 0..self.shared_runtime_state.dfut_retries {
+                    self.check_runtime_state()?;
+
                     let address = {
                         self.shared_runtime_state
                             .fn_name_to_addresses
@@ -616,6 +636,19 @@ impl Runtime {
             .accept_local_work(fn_name, arg_size)
     }
 
+    fn track_failed_task(&self, d_store_id: DStoreId) {
+        self.shared_runtime_state
+            .d_store
+            .local_task_failure(d_store_id);
+
+        let mut failed_local_tasks = self.shared_runtime_state.failed_local_tasks.lock().unwrap();
+        // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
+        // will be handled by the lifetime failover logic.
+        if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
+            failed_local_tasks.push(self.task_id);
+        }
+    }
+
     // Can we use https://docs.rs/tokio-metrics/0.3.1/tokio_metrics/ to make decisions?
     //
     // We return a DStoreId so that we can just pass it over the network.
@@ -643,21 +676,15 @@ impl Runtime {
             async move {
                 rt.start_timer();
 
+                if rt.check_runtime_state().is_err() {
+                    rt.track_failed_task(d_store_id);
+                    return;
+                }
+
                 let t = match fut.await {
                     Ok(t) => t,
                     Err(Error::System) => {
-                        // TODO cleanup d store id
-                        rt.shared_runtime_state
-                            .d_store
-                            .local_task_failure(d_store_id);
-
-                        let mut failed_local_tasks =
-                            rt.shared_runtime_state.failed_local_tasks.lock().unwrap();
-                        if rt.lifetime_id
-                            == rt.shared_runtime_state.lifetime_id.load(Ordering::SeqCst)
-                        {
-                            failed_local_tasks.push(rt.task_id);
-                        }
+                        rt.track_failed_task(d_store_id);
                         return;
                     }
                 };
@@ -668,25 +695,12 @@ impl Runtime {
                 histogram!("do_local_work::duration", "fn_name" => fn_name.clone()).record(took);
                 histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
 
-                {
-                    let failed_remote_tasks =
-                        rt.shared_runtime_state.failed_remote_tasks.lock().unwrap();
-                    if let Some(failed_tasks) = failed_remote_tasks.get(&rt.parent_info.address) {
-                        if rt.parent_info.lifetime_id == failed_tasks.lifetime_id
-                            && failed_tasks.task_ids.contains(&rt.parent_info.task_id)
-                        {
-                            rt.shared_runtime_state
-                                .failed_local_tasks
-                                .lock()
-                                .unwrap()
-                                .push(rt.task_id);
-                            return;
-                        }
-                    }
+                if rt.check_runtime_state().is_err() {
+                    rt.track_failed_task(d_store_id);
+                    return;
                 }
 
                 // TODO: check parent lifeitime id vs rt.parent_info.lifeitime
-
                 // If the entry was removed then publish will fail. So we can ignore the Error.
                 let _ = rt.shared_runtime_state.d_store.publish(d_store_id, t);
             }
@@ -778,13 +792,15 @@ impl FnIndex {
     }
 }
 
-fn worker_stats_to_index(worker_stats: HashMap<String, Stats>) -> FnIndex {
+fn compute_fn_index(address_to_runtime_info: &HashMap<String, RuntimeInfo>) -> FnIndex {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
-    for (address, stats) in worker_stats {
-        for fn_name in stats.fn_stats.keys() {
-            m.entry(fn_name.to_string())
-                .or_default()
-                .push(address.to_string());
+    for (address, runtime_info) in address_to_runtime_info {
+        if let Some(stats) = &runtime_info.stats {
+            for fn_name in stats.fn_stats.keys() {
+                m.entry(fn_name.to_string())
+                    .or_default()
+                    .push(address.to_string());
+            }
         }
     }
     FnIndex { m }
@@ -858,19 +874,27 @@ impl RootRuntimeClient {
                 let shared = shared.lock().unwrap();
                 (shared.client_id.clone(), shared.lifetime_id)
             };
-            let HeartBeatResponse { stats, .. } = global_scheduler
+
+            let HeartBeatResponse {
+                lifetime_id,
+                address_to_runtime_info,
+            } = global_scheduler
                 .heart_beat(HeartBeatRequest {
                     address: client_id,
-                    lifetime_id,
-                    ..Default::default()
+                    current_runtime_info: Some(CurrentRuntimeInfo {
+                        lifetime_id,
+                        ..Default::default()
+                    }),
                 })
                 .await
                 .unwrap()
                 .into_inner();
 
-            let i = worker_stats_to_index(stats);
+            let i = compute_fn_index(&address_to_runtime_info);
             {
-                shared.lock().unwrap().fn_name_to_addresses = i;
+                let mut shared = shared.lock().unwrap();
+                shared.lifetime_id = lifetime_id;
+                shared.fn_name_to_addresses = i;
             }
 
             tokio::time::sleep(sleep_for).await;

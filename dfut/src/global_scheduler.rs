@@ -8,12 +8,13 @@ use tracing::error;
 
 use crate::services::global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    FailedTasks, FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
-    RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, Stats,
+    FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
+    RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, RuntimeInfo,
+    Stats, TaskFailure,
 };
 
-const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 5; // TODO: pass through config
-const DEFAULT_LIFETIME_ID: u64 = 1;
+const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 10; // TODO: pass through config
+const DEFAULT_LIFETIME_ID: u64 = 1; // TODO: pass through config
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Proposal {
@@ -49,16 +50,9 @@ struct LifetimeLease {
 }
 
 #[derive(Debug, Default)]
-struct Lifetimes {
-    list_id: u64,
-    m: HashMap<String, LifetimeLease>,
-}
-
-#[derive(Debug, Default)]
 struct InnerGlobalScheduler {
-    stats: HashMap<String, Stats>,
-    lifetimes: Lifetimes,
-    failed_tasks: HashMap<String, FailedTasks>,
+    lifetimes: HashMap<String, LifetimeLease>,
+    address_to_runtime_info: HashMap<String, RuntimeInfo>,
     next_client_id: u64,
 }
 
@@ -117,20 +111,9 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let RegisterRequest { address, fn_names } = request.into_inner();
 
         let mut inner = self.inner.lock().unwrap();
-        let fn_stats: HashMap<String, FnStats> = fn_names
-            .into_iter()
-            .map(|fn_name| (fn_name, FnStats::default()))
-            .collect();
-        inner.stats.insert(
-            address.to_string(),
-            Stats {
-                fn_stats,
-                ..Default::default()
-            },
-        );
 
         // TODO: store address -> lifetime_id ~forever.
-        let lifetime_id = match inner.lifetimes.m.entry(address) {
+        let lifetime_id = match inner.lifetimes.entry(address.clone()) {
             Entry::Occupied(ref mut e) => {
                 let l = e.get_mut();
                 l.at = Instant::now();
@@ -145,8 +128,26 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
         };
 
+        let runtime_info = inner
+            .address_to_runtime_info
+            .entry(address.clone())
+            .or_insert_with(|| {
+                let fn_stats: HashMap<String, FnStats> = fn_names
+                    .into_iter()
+                    .map(|fn_name| (fn_name, FnStats::default()))
+                    .collect();
+                RuntimeInfo {
+                    stats: Some(Stats {
+                        fn_stats,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            });
+
+        runtime_info.lifetime_id = lifetime_id;
+
         Ok(Response::new(RegisterResponse {
-            leader_redirect: None,
             lifetime_id,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
         }))
@@ -165,7 +166,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         let address = format!("client-id-{id}");
 
-        let lifetime_id = match inner.lifetimes.m.entry(address.clone()) {
+        let lifetime_id = match inner.lifetimes.entry(address.clone()) {
             Entry::Occupied(ref mut e) => {
                 let l = e.get_mut();
                 l.at = Instant::now();
@@ -180,8 +181,15 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
         };
 
+        inner
+            .address_to_runtime_info
+            .entry(address.clone())
+            .or_insert_with(|| RuntimeInfo {
+                lifetime_id,
+                ..Default::default()
+            });
+
         Ok(Response::new(RegisterClientResponse {
-            leader_redirect: None,
             client_id: address,
             lifetime_id,
             heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
@@ -194,43 +202,51 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
     ) -> Result<Response<HeartBeatResponse>, Status> {
         let HeartBeatRequest {
             address,
-            lifetime_id,
-            mut lifetime_list_id,
-            failed_tasks,
-            ..
+            current_runtime_info,
         } = request.into_inner();
+        let Some(current_runtime_info) = current_runtime_info else {
+            return Err(Status::invalid_argument("missing runtime_info"));
+        };
 
         let mut inner = self.inner.lock().unwrap();
 
-        // TODO: new failed_tasks have a ttl of 2 * HBTO and can then be removed.
-        // TODO: use low watermark from worker to avoid having to failed_tasks forever.
-        let e = inner
-            .failed_tasks
-            .entry(address.clone())
-            .or_insert_with(|| FailedTasks {
-                lifetime_id,
-                task_ids: Vec::new(),
-            });
+        let current_lifetime_id = current_runtime_info.lifetime_id;
 
-        if e.lifetime_id < lifetime_id {
-            e.task_ids.clear();
+        match inner.address_to_runtime_info.entry(address.clone()) {
+            Entry::Occupied(ref mut o) => {
+                // TODO: merge
+                let stored_runtime_info = o.get_mut();
+
+                if current_runtime_info.failed_task_ids.len() > 0 {
+                    let new_task_failures: Vec<_> = current_runtime_info
+                        .failed_task_ids
+                        .into_iter()
+                        .map(|task_id| TaskFailure {
+                            lifetime_id: current_runtime_info.lifetime_id,
+                            task_id,
+                        })
+                        .collect();
+                    stored_runtime_info.task_failures.extend(new_task_failures);
+                    stored_runtime_info.task_failures.dedup();
+                }
+            }
+            Entry::Vacant(_) => return Err(Status::not_found("Address is not registered.")),
         }
 
-        e.task_ids.extend(failed_tasks);
-        // TODO: store in hashmap, but ok for now.
-        e.task_ids.dedup();
+        // TODO: new failed_tasks have a ttl of 2 * HBTO and can then be removed.
+        // TODO: use low watermark from worker to avoid having to failed_tasks forever.
 
-        let lifetime_id = match inner.lifetimes.m.entry(address.clone()) {
+        let lifetime_id = match inner.lifetimes.entry(address.clone()) {
             Entry::Occupied(ref mut o) => {
                 let now = Instant::now();
 
                 let lifetime_lease = o.get_mut();
 
-                if lifetime_id > lifetime_lease.id {
+                if current_lifetime_id > lifetime_lease.id {
                     todo!("Error: Workers cannot have a higher lifetime id than the lease, there is a bug.");
                 }
 
-                let expired_lifetime_id = lifetime_id < lifetime_lease.id;
+                let expired_lifetime_id = current_lifetime_id < lifetime_lease.id;
                 let dur_since_last_heart_beat =
                     now.checked_duration_since(lifetime_lease.at).unwrap();
                 let lifetime_id_timeout = dur_since_last_heart_beat > self.lifetime_timeout;
@@ -239,7 +255,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                     if expired_lifetime_id {
                         error!(
                             "expired_lifetime_id: got={}, want={}",
-                            lifetime_id, lifetime_lease.id
+                            current_lifetime_id, lifetime_lease.id
                         );
                     }
                     if lifetime_id_timeout {
@@ -262,25 +278,9 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             }
         };
 
-        let lifetimes = if inner.lifetimes.list_id != lifetime_list_id {
-            lifetime_list_id = inner.lifetimes.list_id;
-            inner
-                .lifetimes
-                .m
-                .iter()
-                .map(|(address, lifetime_lease)| (address.to_string(), lifetime_lease.id))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-
         Ok(Response::new(HeartBeatResponse {
-            leader_redirect: None,
             lifetime_id,
-            lifetime_list_id,
-            lifetimes,
-            stats: inner.stats.clone(),
-            failed_tasks: inner.failed_tasks.clone(),
+            address_to_runtime_info: inner.address_to_runtime_info.clone(),
         }))
     }
 

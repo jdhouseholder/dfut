@@ -7,19 +7,17 @@ message RegisterRequest {
 }
 
 message RegisterResponse {
-	optional string leader_redirect = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 heart_beat_timeout = 3;
+	fixed64 lifetime_id = 1;
+	fixed64 heart_beat_timeout = 2;
 }
 
 message RegisterClientRequest {
 }
 
 message RegisterClientResponse {
-	optional string leader_redirect = 1;
-	string client_id = 2;
-	fixed64 lifetime_id = 3;
-	fixed64 heart_beat_timeout = 4;
+	string client_id = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 heart_beat_timeout = 3;
 }
 
 message FnStats {
@@ -42,32 +40,31 @@ message Stats {
 	map<string, FnStats> fn_stats = 6;
 }
 
-message HeartBeatRequest {
-	string address = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 lifetime_list_id = 3;
-	Stats stats = 4;
-	repeated fixed64 failed_tasks = 5;
+message TaskFailure {
+	fixed64 lifetime_id = 1;
+	fixed64 task_id = 2;
 }
 
-message FailedTasks {
-	fixed64 lifetime_id = 2;
-	repeated fixed64 task_ids = 3;
+message CurrentRuntimeInfo {
+	fixed64 lifetime_id = 1;
+	Stats stats = 2;
+	repeated fixed64 failed_task_ids = 3;
+}
+
+message RuntimeInfo {
+	fixed64 lifetime_id = 1;
+	Stats stats = 2;
+	repeated TaskFailure task_failures = 3;
+}
+
+message HeartBeatRequest {
+	string address = 1;
+	CurrentRuntimeInfo current_runtime_info = 2;
 }
 
 message HeartBeatResponse {
-	optional string leader_redirect = 1;
-	fixed64 lifetime_id = 2;
-
-	fixed64 lifetime_list_id = 3;
-	// address -> lifetime_id
-	map<string, fixed64> lifetimes = 4;
-
-	// TODO: Convert this to a delta to reduce waste.
-	// address -> Stats
-	map<string, Stats> stats = 5;
-
-	map<string, FailedTasks> failed_tasks = 6;
+	fixed64 lifetime_id = 1;
+	map<string, RuntimeInfo> address_to_runtime_info = 2;
 }
 
 message RaftStepRequest {
