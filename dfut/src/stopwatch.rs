@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
-pub(crate) struct Timer {
+pub(crate) struct Stopwatch {
     last_start: Option<Instant>,
     elapsed: Duration,
 }
 
-impl Timer {
+impl Stopwatch {
     pub fn start(&mut self) -> Instant {
         let now = Instant::now();
         if let Some(i) = self.last_start {

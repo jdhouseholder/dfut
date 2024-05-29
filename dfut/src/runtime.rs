@@ -29,7 +29,7 @@ use crate::{
             DoWorkResponse,
         },
     },
-    timer::Timer,
+    stopwatch::Stopwatch,
     work::{IntoWork, Work},
     DResult, Error,
 };
@@ -340,7 +340,7 @@ enum Call {
 #[derive(Debug, Default)]
 struct InnerRuntime {
     calls: HashMap<DStoreId, Call>,
-    timer: Timer,
+    stopwatch: Stopwatch,
 }
 
 #[derive(Debug, Clone)]
@@ -363,16 +363,16 @@ impl Runtime {
             .map(|v| d_store_id.lifetime_id >= v.lifetime_id)
     }
 
-    fn start_timer(&self) -> Instant {
-        self.inner.lock().unwrap().timer.start()
+    fn start_stopwatch(&self) -> Instant {
+        self.inner.lock().unwrap().stopwatch.start()
     }
 
-    fn stop_timer(&self) {
-        self.inner.lock().unwrap().timer.stop();
+    fn stop_stopwatch(&self) {
+        self.inner.lock().unwrap().stopwatch.stop();
     }
 
     fn finish_local_work(&self, fn_name: &str, ret_size: usize) -> Duration {
-        let elapsed = { self.inner.lock().unwrap().timer.elapsed() };
+        let elapsed = { self.inner.lock().unwrap().stopwatch.elapsed() };
 
         self.shared_runtime_state
             .d_scheduler
@@ -507,7 +507,7 @@ impl Runtime {
     {
         match d_fut.inner {
             InnerDFut::DStore(id) => {
-                self.stop_timer();
+                self.stop_stopwatch();
 
                 if let Some(valid) = self.is_valid_id(&id) {
                     if !valid {
@@ -525,7 +525,7 @@ impl Runtime {
                     return self.try_retry_dfut(&id).await;
                 }
 
-                self.start_timer();
+                self.start_stopwatch();
 
                 t
             }
@@ -536,11 +536,11 @@ impl Runtime {
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()> {
         match d_fut.inner {
             InnerDFut::DStore(id) => {
-                self.stop_timer();
+                self.stop_stopwatch();
 
                 if let Some(valid) = self.is_valid_id(&id) {
                     if !valid {
-                        self.start_timer();
+                        self.start_stopwatch();
                         // Ignore failure.
                         return Ok(());
                     }
@@ -551,7 +551,7 @@ impl Runtime {
                     .decrement_or_remove(id, 1)
                     .await?;
 
-                self.start_timer();
+                self.start_stopwatch();
 
                 Ok(())
             }
@@ -562,7 +562,7 @@ impl Runtime {
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
-                self.stop_timer();
+                self.stop_stopwatch();
 
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
@@ -572,7 +572,7 @@ impl Runtime {
 
                 self.shared_runtime_state.d_store.share(&id, 1).await?;
 
-                self.start_timer();
+                self.start_stopwatch();
 
                 Ok(id.clone().into())
             }
@@ -583,7 +583,7 @@ impl Runtime {
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
         match &d_fut.inner {
             InnerDFut::DStore(id) => {
-                self.stop_timer();
+                self.stop_stopwatch();
 
                 if let Some(valid) = self.is_valid_id(id) {
                     if !valid {
@@ -593,7 +593,7 @@ impl Runtime {
 
                 self.shared_runtime_state.d_store.share(&id, n).await?;
 
-                self.start_timer();
+                self.start_stopwatch();
 
                 Ok((0..n).map(|_| id.clone().into()).collect())
             }
@@ -605,12 +605,12 @@ impl Runtime {
     where
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
     {
-        self.stop_timer();
+        self.stop_stopwatch();
         let d_store_id = self.next_d_store_id();
         self.shared_runtime_state
             .d_store
             .publish(d_store_id.clone(), t)?;
-        self.start_timer();
+        self.start_stopwatch();
         Ok(d_store_id.into())
     }
 }
@@ -674,7 +674,7 @@ impl Runtime {
             let d_store_id = d_store_id.clone();
             let fn_name = fn_name.to_string();
             async move {
-                rt.start_timer();
+                rt.start_stopwatch();
 
                 if rt.check_runtime_state().is_err() {
                     rt.track_failed_task(d_store_id);

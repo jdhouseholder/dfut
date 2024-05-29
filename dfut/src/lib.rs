@@ -17,7 +17,7 @@ mod global_scheduler;
 mod peer_work;
 mod runtime;
 mod services;
-mod timer;
+mod stopwatch;
 mod work;
 
 // Try is experimental so we can't create our own type that usese the ? operator.
