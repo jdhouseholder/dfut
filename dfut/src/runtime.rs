@@ -417,8 +417,6 @@ impl Runtime {
             Receiver(Receiver<Arc<dyn ValueTrait>>),
         }
 
-        self.check_runtime_state()?;
-
         let r = {
             let mut inner = self.inner.lock().unwrap();
             let mut e = inner.calls.entry(d_store_id.clone());
@@ -427,9 +425,7 @@ impl Runtime {
                     Call::Remote { .. } => {
                         let (tx, _rx) = channel(1);
                         let v = o.insert(Call::Retrying { tx: tx.clone() });
-                        let work = if let Call::Remote { work } = v {
-                            work
-                        } else {
+                        let Call::Remote { work } = v else {
                             unreachable!()
                         };
                         RetryState::Sender(work, tx)
@@ -447,8 +443,6 @@ impl Runtime {
         match r {
             RetryState::Sender(work, tx) => {
                 for _ in 0..self.shared_runtime_state.dfut_retries {
-                    self.check_runtime_state()?;
-
                     let address = {
                         self.shared_runtime_state
                             .fn_name_to_addresses
@@ -468,11 +462,13 @@ impl Runtime {
                             work.clone(),
                         )
                         .await;
+
                     let t: DResult<T> = self
                         .shared_runtime_state
                         .d_store
                         .get_or_watch(d_store_id.clone())
                         .await;
+
                     if let Ok(t) = t {
                         let mut inner = self.inner.lock().unwrap();
                         let v: Arc<dyn ValueTrait> = Arc::new(t.clone());
@@ -483,6 +479,8 @@ impl Runtime {
 
                         return Ok(t);
                     }
+
+                    self.check_runtime_state()?;
                 }
 
                 let mut inner = self.inner.lock().unwrap();

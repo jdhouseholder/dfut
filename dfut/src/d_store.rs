@@ -649,6 +649,14 @@ mod local_store_test {
         };
         let want = vec![1];
 
+        local_store.reserve(
+            Arc::new(ParentInfo {
+                address: "address".to_string(),
+                lifetime_id: 0,
+                task_id: 0,
+            }),
+            key.clone(),
+        );
         local_store.insert(key.clone(), want.clone()).unwrap();
         let got: Arc<Vec<u8>> = local_store
             .get_or_watch(key)
@@ -688,6 +696,14 @@ mod local_store_test {
             }
         });
 
+        local_store.reserve(
+            Arc::new(ParentInfo {
+                address: "address".to_string(),
+                lifetime_id: 0,
+                task_id: 0,
+            }),
+            key.clone(),
+        );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         local_store.insert(key.clone(), want.clone()).unwrap();
 
