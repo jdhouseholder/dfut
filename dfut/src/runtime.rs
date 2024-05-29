@@ -13,7 +13,7 @@ use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tonic::transport::{Channel, Endpoint, Server};
 
 use crate::{
-    d_fut::{DFut, InnerDFut},
+    d_fut::DFut,
     d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
     peer_work::PeerWorkerClient,
@@ -505,100 +505,86 @@ impl Runtime {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
-        match d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.stop_stopwatch();
+        self.stop_stopwatch();
 
-                if let Some(valid) = self.is_valid_id(&id) {
-                    if !valid {
-                        return self.try_retry_dfut(&id).await;
-                    }
-                }
-
-                let t = self
-                    .shared_runtime_state
-                    .d_store
-                    .get_or_watch(id.clone())
-                    .await;
-
-                if let Err(_) = &t {
-                    return self.try_retry_dfut(&id).await;
-                }
-
-                self.start_stopwatch();
-
-                t
+        if let Some(valid) = self.is_valid_id(&d_fut.d_store_id) {
+            if !valid {
+                return self.try_retry_dfut(&d_fut.d_store_id).await;
             }
-            InnerDFut::Error(err) => Err(err),
         }
+
+        let t = self
+            .shared_runtime_state
+            .d_store
+            .get_or_watch(d_fut.d_store_id.clone())
+            .await;
+
+        if let Err(_) = &t {
+            return self.try_retry_dfut(&d_fut.d_store_id).await;
+        }
+
+        self.start_stopwatch();
+
+        t
     }
 
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()> {
-        match d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.stop_stopwatch();
+        self.stop_stopwatch();
 
-                if let Some(valid) = self.is_valid_id(&id) {
-                    if !valid {
-                        self.start_stopwatch();
-                        // Ignore failure.
-                        return Ok(());
-                    }
-                }
-
-                self.shared_runtime_state
-                    .d_store
-                    .decrement_or_remove(id, 1)
-                    .await?;
-
+        if let Some(valid) = self.is_valid_id(&d_fut.d_store_id) {
+            if !valid {
                 self.start_stopwatch();
-
-                Ok(())
+                // Ignore failure.
+                return Ok(());
             }
-            InnerDFut::Error(err) => Err(err),
         }
+
+        self.shared_runtime_state
+            .d_store
+            .decrement_or_remove(d_fut.d_store_id, 1)
+            .await?;
+
+        self.start_stopwatch();
+
+        Ok(())
     }
 
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.stop_stopwatch();
+        self.stop_stopwatch();
 
-                if let Some(valid) = self.is_valid_id(id) {
-                    if !valid {
-                        return Err(Error::System);
-                    }
-                }
-
-                self.shared_runtime_state.d_store.share(&id, 1).await?;
-
-                self.start_stopwatch();
-
-                Ok(id.clone().into())
+        if let Some(valid) = self.is_valid_id(&d_fut.d_store_id) {
+            if !valid {
+                return Err(Error::System);
             }
-            InnerDFut::Error(err) => Err(err.clone()),
         }
+
+        self.shared_runtime_state
+            .d_store
+            .share(&d_fut.d_store_id, 1)
+            .await?;
+
+        self.start_stopwatch();
+
+        Ok(d_fut.share())
     }
 
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.stop_stopwatch();
+        self.stop_stopwatch();
 
-                if let Some(valid) = self.is_valid_id(id) {
-                    if !valid {
-                        return Err(Error::System);
-                    }
-                }
-
-                self.shared_runtime_state.d_store.share(&id, n).await?;
-
-                self.start_stopwatch();
-
-                Ok((0..n).map(|_| id.clone().into()).collect())
+        if let Some(valid) = self.is_valid_id(&d_fut.d_store_id) {
+            if !valid {
+                return Err(Error::System);
             }
-            InnerDFut::Error(err) => Err(err.clone()),
         }
+
+        self.shared_runtime_state
+            .d_store
+            .share(&d_fut.d_store_id, n)
+            .await?;
+
+        self.start_stopwatch();
+
+        Ok((0..n).map(|_| d_fut.share()).collect())
     }
 
     pub async fn d_box<T>(&self, t: T) -> DResult<DFut<T>>
@@ -962,50 +948,43 @@ impl RuntimeClient {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
     {
-        match d_fut.inner {
-            InnerDFut::DStore(id) => {
-                let t = self.d_store_client.get_or_watch(id.clone()).await;
+        let t = self
+            .d_store_client
+            .get_or_watch(d_fut.d_store_id.clone())
+            .await;
 
-                match t {
-                    Ok(t) => Ok(t),
-                    Err(e) => {
-                        if let Some(work) = { self.remote_work.lock().unwrap().remove(&id) } {
-                            // TODO: dedup like try_retry_dfut.
-                            for _ in 0..DFUT_RETRIES {
-                                let mut shared = self.shared.lock().unwrap();
-                                if let Some(address) =
-                                    shared.fn_name_to_addresses.schedule_fn(&work.fn_name)
-                                {
-                                    let client_id = shared.client_id.clone();
-                                    let lifetime_id = shared.lifetime_id;
-                                    let task_id = shared.next_task_id;
-                                    shared.next_task_id += 1;
+        match t {
+            Ok(t) => Ok(t),
+            Err(e) => {
+                if let Some(work) = { self.remote_work.lock().unwrap().remove(&d_fut.d_store_id) } {
+                    // TODO: dedup like try_retry_dfut.
+                    for _ in 0..DFUT_RETRIES {
+                        let (client_id, lifetime_id, task_id, address) = {
+                            let mut shared = self.shared.lock().unwrap();
+                            let address = shared
+                                .fn_name_to_addresses
+                                .schedule_fn(&work.fn_name)
+                                .unwrap();
+                            let client_id = shared.client_id.clone();
+                            let lifetime_id = shared.lifetime_id;
+                            let task_id = shared.next_task_id;
+                            shared.next_task_id += 1;
+                            (client_id, lifetime_id, task_id, address)
+                        };
 
-                                    let d_store_id = self
-                                        .peer_worker_client
-                                        .clone()
-                                        .do_work(
-                                            &client_id,
-                                            lifetime_id,
-                                            task_id,
-                                            &address,
-                                            work.clone(),
-                                        )
-                                        .await;
+                        let d_store_id = self
+                            .peer_worker_client
+                            .clone()
+                            .do_work(&client_id, lifetime_id, task_id, &address, work.clone())
+                            .await;
 
-                                    if let Ok(t) =
-                                        self.d_store_client.get_or_watch(d_store_id.clone()).await
-                                    {
-                                        return Ok(t);
-                                    }
-                                }
-                            }
+                        if let Ok(t) = self.d_store_client.get_or_watch(d_store_id.clone()).await {
+                            return Ok(t);
                         }
-                        Err(e)
                     }
                 }
+                Err(e)
             }
-            InnerDFut::Error(err) => Err(err),
         }
     }
 
@@ -1013,30 +992,19 @@ impl RuntimeClient {
     where
         T: DeserializeOwned,
     {
-        match d_fut.inner {
-            InnerDFut::DStore(id) => self.d_store_client.decrement_or_remove(id, 1).await,
-            InnerDFut::Error(err) => Err(err),
-        }
+        self.d_store_client
+            .decrement_or_remove(d_fut.d_store_id, 1)
+            .await
     }
 
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.d_store_client.share(id, 1).await?;
-                Ok(id.clone().into())
-            }
-            InnerDFut::Error(err) => Err(err.clone()),
-        }
+        self.d_store_client.share(&d_fut.d_store_id, 1).await?;
+        Ok(d_fut.share())
     }
 
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
-        match &d_fut.inner {
-            InnerDFut::DStore(id) => {
-                self.d_store_client.share(id, n).await?;
-                Ok((0..n).map(|_| id.clone().into()).collect())
-            }
-            InnerDFut::Error(err) => Err(err.clone()),
-        }
+        self.d_store_client.share(&d_fut.d_store_id, n).await?;
+        Ok((0..n).map(|_| d_fut.share()).collect())
     }
 
     pub async fn d_box<T>(&self, _t: T) -> DResult<DFut<T>>

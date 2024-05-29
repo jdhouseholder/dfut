@@ -4,18 +4,12 @@ use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{d_store::DStoreId, Error};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum InnerDFut {
-    DStore(DStoreId),
-    Error(Error),
-}
+use crate::d_store::DStoreId;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DFut<T> {
     // Inner dfut state.
-    pub(crate) inner: InnerDFut,
+    pub(crate) d_store_id: DStoreId,
 
     // Track the type!
     #[serde(skip)]
@@ -23,9 +17,16 @@ pub struct DFut<T> {
 }
 
 impl<T> DFut<T> {
-    pub(crate) fn new(inner: InnerDFut) -> Self {
+    pub(crate) fn new(d_store_id: DStoreId) -> Self {
         Self {
-            inner,
+            d_store_id,
+            _phantom_data: PhantomData::default(),
+        }
+    }
+
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            d_store_id: self.d_store_id.clone(),
             _phantom_data: PhantomData::default(),
         }
     }
@@ -33,6 +34,6 @@ impl<T> DFut<T> {
 
 impl<T> From<DStoreId> for DFut<T> {
     fn from(value: DStoreId) -> Self {
-        DFut::new(InnerDFut::DStore(value))
+        DFut::new(value)
     }
 }
