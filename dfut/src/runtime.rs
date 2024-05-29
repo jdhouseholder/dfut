@@ -205,7 +205,10 @@ impl RootRuntime {
                 .unwrap()
                 .into_inner();
 
-            let fn_index = compute_fn_index(&address_to_runtime_info);
+            let fn_index = compute_fn_index(
+                &address_to_runtime_info,
+                &self.shared_runtime_state.local_server_address,
+            );
             {
                 *self
                     .shared_runtime_state
@@ -776,9 +779,15 @@ impl FnIndex {
     }
 }
 
-fn compute_fn_index(address_to_runtime_info: &HashMap<String, RuntimeInfo>) -> FnIndex {
+fn compute_fn_index(
+    address_to_runtime_info: &HashMap<String, RuntimeInfo>,
+    current_address: &str,
+) -> FnIndex {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
     for (address, runtime_info) in address_to_runtime_info {
+        if address == current_address {
+            continue;
+        }
         if let Some(stats) = &runtime_info.stats {
             for fn_name in stats.fn_stats.keys() {
                 m.entry(fn_name.to_string())
@@ -874,7 +883,7 @@ impl RootRuntimeClient {
                 .unwrap()
                 .into_inner();
 
-            let i = compute_fn_index(&address_to_runtime_info);
+            let i = compute_fn_index(&address_to_runtime_info, "");
             {
                 let mut shared = shared.lock().unwrap();
                 shared.lifetime_id = lifetime_id;
