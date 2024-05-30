@@ -12,14 +12,31 @@ pub enum Where {
     Local,
 }
 
+#[allow(unused)]
+#[derive(Debug, Default, Clone)]
+struct CallStats {
+    arg_size: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct RetStats {
+    dur: Duration,
+    ret_size: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 struct FnStats {
-    v: Vec<(Duration, usize)>,
+    call_stats: Vec<CallStats>,
+    ret_stats: Vec<RetStats>,
 }
 
 impl FnStats {
-    fn track(&mut self, dur: std::time::Duration, ret_size: usize) {
-        self.v.push((dur, ret_size));
+    fn track_call(&mut self, arg_size: usize) {
+        self.call_stats.push(CallStats { arg_size });
+    }
+
+    fn track_ret(&mut self, dur: std::time::Duration, ret_size: usize) {
+        self.ret_stats.push(RetStats { dur, ret_size });
     }
 }
 
@@ -40,40 +57,27 @@ impl DScheduler {
     pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Where {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
-        let last_stats = {
-            self.stats
-                .lock()
-                .unwrap()
-                .fn_stats
-                .get(fn_name)
-                .map(|s| {
-                    s.v.last()
-                        .map(|(duration, ret_size)| (duration.as_secs_f64(), *ret_size))
-                })
-                .flatten()
+        let (dur, ret_size) = {
+            let mut stats = self.stats.lock().unwrap();
+            let fn_stats = stats.fn_stats.entry(fn_name.to_string()).or_default();
+            fn_stats.track_call(arg_size);
+            let (dur, ret_size) = fn_stats
+                .ret_stats
+                .last()
+                .map(|RetStats { dur, ret_size }| (dur.as_secs_f64(), *ret_size))
+                .unwrap_or((0f64, 0usize));
+            (dur, ret_size)
         };
 
         // 1. Increase local probability if large args or ret.
         // 2. Decrease local probability if the historical duration is large.
-        let p = if let Some((duration, ret_size)) = last_stats {
-            let s = if arg_size + ret_size >= STAY_LOCAL_THRESHOLD {
-                0.8
-            } else {
-                0.5
-            };
-            let d = if duration > 1. {
-                1. / (2. + duration)
-            } else {
-                0.
-            };
-            s - d
+        let s = if arg_size + ret_size >= STAY_LOCAL_THRESHOLD {
+            0.8
         } else {
-            if arg_size >= STAY_LOCAL_THRESHOLD {
-                0.8
-            } else {
-                0.5
-            }
+            0.5
         };
+        let d = if dur > 1. { 1. / (2. + dur) } else { 0. };
+        let p = s - d;
 
         let f: f64 = rand::random();
         let local = f < p;
@@ -100,6 +104,6 @@ impl DScheduler {
             .fn_stats
             .entry(fn_name.to_string())
             .or_default()
-            .track(took, ret_size);
+            .track_ret(took, ret_size);
     }
 }
