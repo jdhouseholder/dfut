@@ -9,6 +9,8 @@ use crate::{d_store::DStoreId, work::Work};
 
 use crate::services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest};
 
+const WORKER_SERVER_CLIENT_CACHE_SIZE: usize = 20;
+
 #[derive(Debug, Clone)]
 pub(crate) struct PeerWorkerClient {
     worker_service_client_cache: Arc<Mutex<LruCache<String, WorkerServiceClient<Channel>>>>,
@@ -18,7 +20,7 @@ impl PeerWorkerClient {
     pub(crate) fn new() -> Self {
         Self {
             worker_service_client_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(20).unwrap(),
+                NonZeroUsize::new(WORKER_SERVER_CLIENT_CACHE_SIZE).unwrap(),
             ))),
         }
     }

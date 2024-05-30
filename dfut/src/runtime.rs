@@ -29,6 +29,7 @@ use crate::{
             DoWorkResponse,
         },
     },
+    sleep::sleep_with_jitter,
     stopwatch::Stopwatch,
     work::{IntoWork, Work},
     DResult, Error,
@@ -172,7 +173,7 @@ impl RootRuntime {
 
     async fn heart_beat_forever(&self) {
         // TODO: shutdown via select.
-        let sleep_for = Duration::from_secs(self.heart_beat_timeout / 3);
+        let sleep_for = self.heart_beat_timeout / 3;
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
@@ -287,7 +288,7 @@ impl RootRuntime {
 
             // TODO: insert tombstone for tasks that are running on this worker
 
-            tokio::time::sleep(sleep_for).await;
+            sleep_with_jitter(sleep_for).await;
         }
     }
 
@@ -754,6 +755,7 @@ impl Runtime {
                 work.clone(),
             )
             .await;
+
         self.track_call(d_store_id.clone(), Call::Remote { work });
 
         d_store_id.into()
@@ -861,7 +863,7 @@ impl RootRuntimeClient {
             shared.client_id = client_id;
             shared.lifetime_id = lifetime_id;
         }
-        let sleep_for = Duration::from_secs(heart_beat_timeout / 3);
+        let sleep_for = heart_beat_timeout / 3;
         loop {
             let (client_id, lifetime_id) = {
                 let shared = shared.lock().unwrap();
@@ -890,19 +892,32 @@ impl RootRuntimeClient {
                 shared.fn_name_to_addresses = i;
             }
 
-            tokio::time::sleep(sleep_for).await;
+            sleep_with_jitter(sleep_for).await;
         }
     }
 
     pub fn new_runtime_client(&self) -> RuntimeClient {
+        let mut shared = self.shared.lock().unwrap();
+        let task_id = shared.next_task_id;
+        shared.next_task_id += 1;
+
         RuntimeClient {
             shared: Arc::clone(&self.shared),
             peer_worker_client: self.peer_worker_client.clone(),
             d_store_client: self.d_store_client.clone(),
+            task_id,
 
-            remote_work: Mutex::new(HashMap::new()),
+            calls: Mutex::new(HashMap::new()),
+            dfut_retries: DFUT_RETRIES,
         }
     }
+}
+
+enum ClientCall {
+    Remote { work: Work },
+    Retrying { tx: Sender<Arc<dyn ValueTrait>> },
+    RetriedOk { v: Arc<dyn ValueTrait> },
+    RetriedErr,
 }
 
 // TODO: Runtime clients need to heartbeat with the global scheduler.
@@ -913,7 +928,10 @@ pub struct RuntimeClient {
     peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 
-    remote_work: Mutex<HashMap<DStoreId, Work>>,
+    task_id: u64,
+
+    calls: Mutex<HashMap<DStoreId, ClientCall>>,
+    dfut_retries: usize,
 }
 
 impl RuntimeClient {
@@ -922,16 +940,15 @@ impl RuntimeClient {
         I: IntoWork,
     {
         let w = iw.into_work();
-        let (client_id, address, lifetime_id, task_id) = {
+        // TODO: fail if we don't eventually schedule?
+        let (client_id, address, lifetime_id) = {
             'scheduled: loop {
                 {
-                    let mut shared = self.shared.lock().unwrap();
+                    let shared = self.shared.lock().unwrap();
                     if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name) {
                         let client_id = shared.client_id.clone();
                         let lifetime_id = shared.lifetime_id;
-                        let task_id = shared.next_task_id;
-                        shared.next_task_id += 1;
-                        break 'scheduled (client_id, address, lifetime_id, task_id);
+                        break 'scheduled (client_id, address, lifetime_id);
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -940,15 +957,100 @@ impl RuntimeClient {
         let d_store_id = self
             .peer_worker_client
             .clone()
-            .do_work(&client_id, lifetime_id, task_id, &address, w.clone())
+            .do_work(&client_id, lifetime_id, self.task_id, &address, w.clone())
             .await;
 
-        self.remote_work
+        self.calls
             .lock()
             .unwrap()
-            .insert(d_store_id.clone(), w);
+            .insert(d_store_id.clone(), ClientCall::Remote { work: w.clone() });
 
         d_store_id.into()
+    }
+
+    async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
+    where
+        T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
+    {
+        enum RetryState {
+            Sender(Work, Sender<Arc<dyn ValueTrait>>),
+            Receiver(Receiver<Arc<dyn ValueTrait>>),
+        }
+
+        let r = {
+            let mut calls = self.calls.lock().unwrap();
+            let mut e = calls.entry(d_store_id.clone());
+            match e {
+                Entry::Occupied(ref mut o) => match o.get() {
+                    ClientCall::Remote { .. } => {
+                        let (tx, _rx) = channel(1);
+                        let v = o.insert(ClientCall::Retrying { tx: tx.clone() });
+                        let ClientCall::Remote { work } = v else {
+                            unreachable!()
+                        };
+                        RetryState::Sender(work, tx)
+                    }
+                    ClientCall::Retrying { tx } => RetryState::Receiver(tx.subscribe()),
+                    ClientCall::RetriedOk { v } => {
+                        let t: Arc<T> = Arc::clone(&v).as_any().downcast().unwrap();
+                        return Ok((*t).clone());
+                    }
+                    ClientCall::RetriedErr => return Err(Error::System),
+                },
+                Entry::Vacant(_) => unreachable!(),
+            }
+        };
+        match r {
+            RetryState::Sender(work, tx) => {
+                for _ in 0..self.dfut_retries {
+                    let (client_id, lifetime_id, task_id, address) = {
+                        let mut shared = self.shared.lock().unwrap();
+                        let address = shared
+                            .fn_name_to_addresses
+                            .schedule_fn(&work.fn_name)
+                            .unwrap();
+                        let client_id = shared.client_id.clone();
+                        let lifetime_id = shared.lifetime_id;
+                        let task_id = shared.next_task_id;
+                        shared.next_task_id += 1;
+                        (client_id, lifetime_id, task_id, address)
+                    };
+
+                    let d_store_id = self
+                        .peer_worker_client
+                        .do_work(&client_id, lifetime_id, task_id, &address, work.clone())
+                        .await;
+
+                    let t: DResult<T> = self.d_store_client.get_or_watch(d_store_id.clone()).await;
+
+                    if let Ok(t) = t {
+                        let v: Arc<dyn ValueTrait> = Arc::new(t.clone());
+                        self.calls.lock().unwrap().insert(
+                            d_store_id.clone(),
+                            ClientCall::RetriedOk { v: Arc::clone(&v) },
+                        );
+                        let _ = tx.send(v);
+
+                        return Ok(t);
+                    }
+                }
+
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .insert(d_store_id.clone(), ClientCall::RetriedErr);
+
+                return Err(Error::System);
+            }
+            RetryState::Receiver(mut rx) => {
+                let v = match rx.recv().await {
+                    Ok(v) => v,
+                    Err(_) => return Err(Error::System),
+                };
+                let t: Arc<T> = v.as_any().downcast().unwrap();
+                return Ok((*t).clone());
+            }
+        }
     }
 
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> DResult<T>
@@ -962,36 +1064,7 @@ impl RuntimeClient {
 
         match t {
             Ok(t) => Ok(t),
-            Err(e) => {
-                if let Some(work) = { self.remote_work.lock().unwrap().remove(&d_fut.d_store_id) } {
-                    // TODO: dedup like try_retry_dfut.
-                    for _ in 0..DFUT_RETRIES {
-                        let (client_id, lifetime_id, task_id, address) = {
-                            let mut shared = self.shared.lock().unwrap();
-                            let address = shared
-                                .fn_name_to_addresses
-                                .schedule_fn(&work.fn_name)
-                                .unwrap();
-                            let client_id = shared.client_id.clone();
-                            let lifetime_id = shared.lifetime_id;
-                            let task_id = shared.next_task_id;
-                            shared.next_task_id += 1;
-                            (client_id, lifetime_id, task_id, address)
-                        };
-
-                        let d_store_id = self
-                            .peer_worker_client
-                            .clone()
-                            .do_work(&client_id, lifetime_id, task_id, &address, work.clone())
-                            .await;
-
-                        if let Ok(t) = self.d_store_client.get_or_watch(d_store_id.clone()).await {
-                            return Ok(t);
-                        }
-                    }
-                }
-                Err(e)
-            }
+            Err(_) => self.try_retry_dfut(&d_fut.d_store_id).await,
         }
     }
 

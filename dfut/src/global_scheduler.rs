@@ -2,7 +2,6 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::error;
 
@@ -12,35 +11,6 @@ use crate::services::global_scheduler_service::{
     RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, RuntimeInfo,
     Stats, TaskFailure,
 };
-
-const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 10; // TODO: pass through config
-
-#[derive(Debug, Serialize, Deserialize)]
-enum Proposal {
-    // Adds worker to pool of available workers.
-    Add {
-        address: String,
-        lifetime_id: u64,
-        fns: Vec<String>,
-    },
-    // Updates heartbeat and scheduler state.
-    KeepAlive {
-        address: String,
-        lifetime_id: u64,
-    },
-    // Keeps scheduler stats approx. in sync.
-    SchedulerSync {
-        fns: HashMap<String, ()>,
-    },
-    // Removes worker from pool of available workers.
-    // Either due to:
-    // * Lifetime expiry.
-    // * Clean removal.
-    Remove {
-        address: String,
-        lifetime_id: u64,
-    },
-}
 
 #[derive(Debug)]
 struct LifetimeLease {
@@ -148,7 +118,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         Ok(Response::new(RegisterResponse {
             lifetime_id,
-            heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            heart_beat_timeout: self.lifetime_timeout.as_millis() as u64,
         }))
     }
 
@@ -191,7 +161,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         Ok(Response::new(RegisterClientResponse {
             client_id: address,
             lifetime_id,
-            heart_beat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            heart_beat_timeout: self.lifetime_timeout.as_millis() as u64,
         }))
     }
 
