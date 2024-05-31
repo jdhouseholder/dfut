@@ -13,6 +13,7 @@ pub struct WorkerServerConfig {
 mod d_fut;
 mod d_scheduler;
 mod d_store;
+mod gaps;
 mod global_scheduler;
 mod peer_work;
 mod runtime;
