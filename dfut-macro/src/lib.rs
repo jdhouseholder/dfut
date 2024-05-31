@@ -397,13 +397,13 @@ pub fn d_await(item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn d_cancel(item: TokenStream) -> TokenStream {
     let e: syn::Expr = syn::parse(item).unwrap();
-    let expanded = quote! { self.cancel(#e).await };
+    let expanded = quote! { self.d_cancel(#e).await? };
     TokenStream::from(expanded)
 }
 
 #[proc_macro]
 pub fn d_box(item: TokenStream) -> TokenStream {
     let e: syn::Expr = syn::parse(item).unwrap();
-    let expanded = quote! { self.d_box(#e).await };
+    let expanded = quote! { self.d_box(#e).await? };
     TokenStream::from(expanded)
 }
