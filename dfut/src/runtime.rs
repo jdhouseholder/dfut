@@ -10,12 +10,16 @@ use metrics::{counter, histogram};
 use rand::seq::SliceRandom;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
-use tonic::transport::{Channel, Endpoint, Server};
+use tonic::{
+    transport::{Channel, Endpoint, Server},
+    Status,
+};
 
 use crate::{
     d_fut::DFut,
     d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
+    gaps,
     peer_work::PeerWorkerClient,
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
@@ -35,6 +39,19 @@ use crate::{
     DResult, Error,
 };
 
+#[derive(Debug, Default)]
+struct LifetimeScopedGaps {
+    lifetime_id: u64,
+    gaps: gaps::Gaps,
+}
+
+impl LifetimeScopedGaps {
+    fn reset(&mut self, lifetime_id: u64) {
+        self.lifetime_id = lifetime_id;
+        self.gaps.clear();
+    }
+}
+
 const DFUT_RETRIES: usize = 10;
 
 #[derive(Debug)]
@@ -47,6 +64,7 @@ struct SharedRuntimeState {
     peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
 
+    address_to_gaps: Mutex<HashMap<String, LifetimeScopedGaps>>,
     address_to_runtime_info: Mutex<HashMap<String, RuntimeInfo>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
@@ -99,6 +117,7 @@ impl RootRuntime {
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store,
 
+                address_to_gaps: Mutex::default(),
                 address_to_runtime_info: Mutex::default(),
                 lifetime_id,
                 next_task_id,
@@ -126,6 +145,7 @@ impl RootRuntime {
         parent_address: &str,
         parent_lifetime_id: u64,
         parent_task_id: u64,
+        request_id: u64,
     ) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
@@ -135,6 +155,7 @@ impl RootRuntime {
                 address: parent_address.to_string(),
                 lifetime_id: parent_lifetime_id,
                 task_id: parent_task_id,
+                request_id,
             }),
             task_id: self
                 .shared_runtime_state
@@ -144,31 +165,85 @@ impl RootRuntime {
         }
     }
 
+    fn validate_lifetime_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+    ) -> Result<(), Status> {
+        let address_to_runtime_info = self
+            .shared_runtime_state
+            .address_to_runtime_info
+            .lock()
+            .unwrap();
+        if let Some(runtime_info) = address_to_runtime_info.get(parent_address) {
+            if parent_lifetime_id < runtime_info.lifetime_id {
+                return Err(Status::invalid_argument("lifetime id too old."));
+            }
+        }
+        Ok(())
+    }
+
+    fn have_seen_request_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        request_id: u64,
+    ) -> bool {
+        let mut address_to_gaps = self.shared_runtime_state.address_to_gaps.lock().unwrap();
+        let gaps = address_to_gaps
+            .entry(parent_address.to_string())
+            .or_default();
+        if gaps.lifetime_id < parent_lifetime_id {
+            gaps.lifetime_id = parent_lifetime_id;
+            gaps.gaps.clear();
+        }
+        if gaps.lifetime_id > parent_lifetime_id {
+            // TODO: This would mean that there is a system bug.
+            unreachable!()
+        }
+
+        gaps.gaps.add(request_id).is_seen()
+    }
+
     pub fn do_local_work<F, T, FutFn>(
         &self,
         parent_address: &str,
         parent_lifetime_id: u64,
         parent_task_id: u64,
+        request_id: u64,
         fn_name: &str,
         f: FutFn,
-    ) -> DoWorkResponse
+    ) -> Result<DoWorkResponse, Status>
     where
         F: Future<Output = DResult<T>> + Send + 'static,
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
-        // TODO: check (parent_address, parent_lifetime_id) before executing local work to ensure
-        // that we don't ever execute old work.
+        self.validate_lifetime_id(parent_address, parent_lifetime_id)?;
 
-        let runtime = self.new_child(parent_address, parent_lifetime_id, parent_task_id);
+        if self.have_seen_request_id(parent_address, parent_lifetime_id, request_id) {
+            return self
+                .shared_runtime_state
+                .d_store
+                .parent_info_to_id(
+                    parent_address,
+                    parent_lifetime_id,
+                    parent_task_id,
+                    request_id,
+                )
+                .map(|d_store_id| d_store_id.into())
+                .ok_or(Status::not_found("Result has already been deallocated"));
+        }
+
+        let runtime = self.new_child(
+            parent_address,
+            parent_lifetime_id,
+            parent_task_id,
+            request_id,
+        );
         let fut = f(runtime.clone());
         let d_store_id = runtime.do_local_work(fn_name, fut);
-        DoWorkResponse {
-            address: d_store_id.address,
-            lifetime_id: d_store_id.lifetime_id,
-            task_id: d_store_id.task_id,
-            object_id: d_store_id.object_id,
-        }
+        Ok(d_store_id.into())
     }
 
     async fn heart_beat_forever(&self) {
@@ -234,6 +309,16 @@ impl RootRuntime {
                             self.shared_runtime_state
                                 .d_store
                                 .worker_failure(address, runtime_info.lifetime_id);
+
+                            if let Some(gaps) = self
+                                .shared_runtime_state
+                                .address_to_gaps
+                                .lock()
+                                .unwrap()
+                                .get_mut(address)
+                            {
+                                gaps.reset(runtime_info.lifetime_id);
+                            }
                         }
                     }
                 }
@@ -465,7 +550,7 @@ impl Runtime {
                             &address,
                             work.clone(),
                         )
-                        .await;
+                        .await?;
 
                     let t: DResult<T> = self
                         .shared_runtime_state
@@ -729,7 +814,7 @@ impl Runtime {
     // for local computation. We only use it for remote computation.
     //
     // Put work into local queue or remote queue.
-    pub async fn do_remote_work<I, T>(&self, iw: I) -> DFut<T>
+    pub async fn do_remote_work<I, T>(&self, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
     {
@@ -754,11 +839,11 @@ impl Runtime {
                 &address,
                 work.clone(),
             )
-            .await;
+            .await?;
 
         self.track_call(d_store_id.clone(), Call::Remote { work });
 
-        d_store_id.into()
+        Ok(d_store_id.into())
     }
 }
 
@@ -935,7 +1020,7 @@ pub struct RuntimeClient {
 }
 
 impl RuntimeClient {
-    pub async fn do_remote_work<I, T>(&self, iw: I) -> DFut<T>
+    pub async fn do_remote_work<I, T>(&self, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
     {
@@ -956,16 +1041,15 @@ impl RuntimeClient {
         };
         let d_store_id = self
             .peer_worker_client
-            .clone()
             .do_work(&client_id, lifetime_id, self.task_id, &address, w.clone())
-            .await;
+            .await?;
 
         self.calls
             .lock()
             .unwrap()
             .insert(d_store_id.clone(), ClientCall::Remote { work: w.clone() });
 
-        d_store_id.into()
+        Ok(d_store_id.into())
     }
 
     async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
@@ -1019,7 +1103,7 @@ impl RuntimeClient {
                     let d_store_id = self
                         .peer_worker_client
                         .do_work(&client_id, lifetime_id, task_id, &address, work.clone())
-                        .await;
+                        .await?;
 
                     let t: DResult<T> = self.d_store_client.get_or_watch(d_store_id.clone()).await;
 

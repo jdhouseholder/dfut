@@ -6,6 +6,7 @@ pub enum GapState {
     New,
     Seen,
 }
+
 impl GapState {
     #[allow(unused)]
     pub fn is_new(&self) -> bool {
@@ -53,6 +54,11 @@ impl Gaps {
             }
         }
     }
+
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.gaps.clear();
+    }
 }
 
 #[cfg(test)]
@@ -62,14 +68,17 @@ mod test {
     #[test]
     fn it_works() {
         let mut gaps = Gaps::default();
-        assert_eq!(gaps.add(0), GapState::New);
-        assert_eq!(gaps.add(1), GapState::New);
-        assert_eq!(gaps.add(1), GapState::Seen);
-        assert_eq!(gaps.add(5), GapState::New);
-        assert_eq!(gaps.add(3), GapState::New);
-        assert_eq!(gaps.add(2), GapState::New);
-        assert_eq!(gaps.add(3), GapState::Seen);
-        assert_eq!(gaps.add(4), GapState::New);
-        assert_eq!(gaps.add(6), GapState::New);
+        for _ in 0..2 {
+            assert_eq!(gaps.add(0), GapState::New);
+            assert_eq!(gaps.add(1), GapState::New);
+            assert_eq!(gaps.add(1), GapState::Seen);
+            assert_eq!(gaps.add(5), GapState::New);
+            assert_eq!(gaps.add(3), GapState::New);
+            assert_eq!(gaps.add(2), GapState::New);
+            assert_eq!(gaps.add(3), GapState::Seen);
+            assert_eq!(gaps.add(4), GapState::New);
+            assert_eq!(gaps.add(6), GapState::New);
+            gaps.clear();
+        }
     }
 }

@@ -74,7 +74,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                         let syn::GenericArgument::Type(ty) = &generics.args[0] else {
                             panic!()
                         };
-                        quote! { dfut::DFut<#ty> }
+                        quote! { dfut::DResult<dfut::DFut<#ty>> }
                     }
                 };
 
@@ -156,12 +156,12 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
                         match self.runtime.schedule_work(fn_name, size) {
                             dfut::Where::Local => {
-                                self.runtime.do_local_work_fut(
+                                Ok(self.runtime.do_local_work_fut(
                                     fn_name,
                                     |r| async move {
                                         #worker_ty::new(r).#fn_impl_name(#(#fn_arg_idents),*).await
                                     }
-                                )
+                                ))
                             },
                             dfut::Where::Remote { .. } => {
                                 self.runtime.do_remote_work(#work_enum_ident::#work_variant_ident {
@@ -201,13 +201,14 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                             &parent_address,
                             parent_lifetime_id,
                             parent_task_id,
+                            request_id,
                             fn_name,
                             |runtime| async move {
                                 #worker_ty::new(runtime)
                                     .#fn_impl_name(#(#fn_arg_idents),*)
                                     .await
                             }
-                        )
+                        )?
                     }
                 });
             }
@@ -372,7 +373,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 &self,
                 request: dfut::tonic::Request<dfut::DoWorkRequest>,
             ) -> Result<dfut::tonic::Response<dfut::DoWorkResponse>, dfut::tonic::Status> {
-                let dfut::DoWorkRequest { parent_address, parent_lifetime_id, parent_task_id, fn_name, args, .. } = request.into_inner();
+                let dfut::DoWorkRequest { parent_address, parent_lifetime_id, parent_task_id, request_id, fn_name, args, .. } = request.into_inner();
 
                 let args: #work_enum_ident = dfut::bincode::deserialize(&args).unwrap();
                 let resp = match args {

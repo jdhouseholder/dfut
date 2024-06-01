@@ -78,6 +78,7 @@ pub(crate) struct ParentInfo {
     pub(crate) address: String,
     pub(crate) lifetime_id: u64,
     pub(crate) task_id: u64,
+    pub(crate) request_id: u64,
 }
 
 #[derive(Debug)]
@@ -312,6 +313,27 @@ impl LocalStore {
         }
         m.clear();
     }
+
+    fn parent_info_to_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        parent_task_id: u64,
+        request_id: u64,
+    ) -> Option<DStoreId> {
+        let m = self.m.lock().unwrap();
+        for (k, v) in m.iter() {
+            if v.parent_info.address == parent_address
+                && v.parent_info.lifetime_id == parent_lifetime_id
+                && v.parent_info.task_id == parent_task_id
+                && v.parent_info.request_id == request_id
+            {
+                return Some(k.clone());
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -407,6 +429,21 @@ impl DStore {
 
     pub(crate) fn clear(&self) {
         self.local_store.clear()
+    }
+
+    pub(crate) fn parent_info_to_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        parent_task_id: u64,
+        request_id: u64,
+    ) -> Option<DStoreId> {
+        self.local_store.parent_info_to_id(
+            parent_address,
+            parent_lifetime_id,
+            parent_task_id,
+            request_id,
+        )
     }
 }
 
@@ -654,6 +691,7 @@ mod local_store_test {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
+                request_id: 0,
             }),
             key.clone(),
         );
@@ -701,6 +739,7 @@ mod local_store_test {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
+                request_id: 0,
             }),
             key.clone(),
         );

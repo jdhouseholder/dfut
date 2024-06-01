@@ -6,8 +6,10 @@ message DoWorkRequest {
 	fixed64 parent_lifetime_id = 2;
 	fixed64 parent_task_id = 3;
 
-	string fn_name = 4;
-	bytes args = 5;
+	fixed64 request_id = 4;
+
+	string fn_name = 5;
+	bytes args = 6;
 }
 
 message DoWorkResponse {
