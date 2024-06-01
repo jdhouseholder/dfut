@@ -8,7 +8,7 @@ use tonic::{
     Code,
 };
 
-use crate::{d_store::DStoreId, seq::Seq, work::Work, DResult, Error};
+use crate::{d_store::DStoreId, work::Work, DResult, Error};
 
 use crate::services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest};
 
@@ -17,7 +17,6 @@ const WORKER_SERVER_CLIENT_CACHE_SIZE: usize = 20;
 #[derive(Debug, Clone)]
 pub(crate) struct PeerWorkerClient {
     worker_service_client_cache: Arc<Mutex<LruCache<String, WorkerServiceClient<Channel>>>>,
-    peer_to_next_request_id: Arc<Mutex<Seq>>,
 }
 
 impl PeerWorkerClient {
@@ -26,7 +25,6 @@ impl PeerWorkerClient {
             worker_service_client_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(WORKER_SERVER_CLIENT_CACHE_SIZE).unwrap(),
             ))),
-            peer_to_next_request_id: Arc::default(),
         }
     }
 
@@ -42,15 +40,12 @@ impl PeerWorkerClient {
         panic!();
     }
 
-    fn take_next_request_id(&self, address: &str) -> u64 {
-        self.peer_to_next_request_id.lock().unwrap().next(address)
-    }
-
     pub(crate) async fn do_work(
         &self,
         current_address: &str,
         current_lifetime_id: u64,
         current_task_id: u64,
+        request_id: u64,
         address: &str,
         w: Work,
     ) -> DResult<DStoreId> {
@@ -74,8 +69,6 @@ impl PeerWorkerClient {
                 client
             }
         };
-
-        let request_id = self.take_next_request_id(&address);
 
         for i in 0..5 {
             match client

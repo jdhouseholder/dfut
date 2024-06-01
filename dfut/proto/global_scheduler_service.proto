@@ -40,15 +40,26 @@ message Stats {
 	map<string, FnStats> fn_stats = 6;
 }
 
-message TaskFailure {
-	fixed64 lifetime_id = 1;
-	fixed64 task_id = 2;
+message RequestId {
+	string address = 1;
+	fixed64 request_id = 2;
+}
+
+message FailedLocalTask {
+	fixed64 task_id = 1;
+	repeated RequestId requests = 2;
 }
 
 message CurrentRuntimeInfo {
 	fixed64 lifetime_id = 1;
 	Stats stats = 2;
-	repeated fixed64 failed_task_ids = 3;
+	repeated FailedLocalTask failed_local_tasks = 3;
+}
+
+message TaskFailure {
+	fixed64 lifetime_id = 1;
+	fixed64 task_id = 2;
+	repeated RequestId requests = 3;
 }
 
 message RuntimeInfo {

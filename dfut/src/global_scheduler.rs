@@ -196,13 +196,14 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 // TODO: merge
                 let stored_runtime_info = o.get_mut();
 
-                if current_runtime_info.failed_task_ids.len() > 0 {
+                if current_runtime_info.failed_local_tasks.len() > 0 {
                     let new_task_failures: Vec<_> = current_runtime_info
-                        .failed_task_ids
+                        .failed_local_tasks
                         .into_iter()
-                        .map(|task_id| TaskFailure {
+                        .map(|failed_task| TaskFailure {
                             lifetime_id: current_runtime_info.lifetime_id,
-                            task_id,
+                            task_id: failed_task.task_id,
+                            requests: failed_task.requests,
                         })
                         .collect();
                     stored_runtime_info.task_failures.extend(new_task_failures);

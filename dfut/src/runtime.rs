@@ -21,12 +21,13 @@ use crate::{
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
     gaps,
     peer_work::PeerWorkerClient,
+    seq::Seq,
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
         global_scheduler_service::{
             global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
-            HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
-            RegisterRequest, RegisterResponse, RuntimeInfo, TaskFailure,
+            FailedLocalTask, HeartBeatRequest, HeartBeatResponse, RegisterClientRequest,
+            RegisterClientResponse, RegisterRequest, RegisterResponse, RequestId, RuntimeInfo,
         },
         worker_service::{
             worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
@@ -50,6 +51,10 @@ impl LifetimeScopedGaps {
         self.lifetime_id = lifetime_id;
         self.gaps.clear();
     }
+
+    fn add(&mut self, lifetime_id: u64) -> gaps::GapState {
+        self.gaps.add(lifetime_id)
+    }
 }
 
 const DFUT_RETRIES: usize = 10;
@@ -68,9 +73,10 @@ struct SharedRuntimeState {
     address_to_runtime_info: Mutex<HashMap<String, RuntimeInfo>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
+    next_request_id: Arc<Mutex<Seq>>,
 
     fn_name_to_addresses: Mutex<FnIndex>,
-    failed_local_tasks: Mutex<Vec<u64>>,
+    failed_local_tasks: Mutex<Vec<FailedLocalTask>>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +127,7 @@ impl RootRuntime {
                 address_to_runtime_info: Mutex::default(),
                 lifetime_id,
                 next_task_id,
+                next_request_id: Arc::default(),
 
                 fn_name_to_addresses: Mutex::new(FnIndex::default()),
                 failed_local_tasks: Mutex::default(),
@@ -145,7 +152,7 @@ impl RootRuntime {
         parent_address: &str,
         parent_lifetime_id: u64,
         parent_task_id: u64,
-        request_id: u64,
+        parent_request_id: u64,
     ) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
@@ -155,7 +162,7 @@ impl RootRuntime {
                 address: parent_address.to_string(),
                 lifetime_id: parent_lifetime_id,
                 task_id: parent_task_id,
-                request_id,
+                request_id: parent_request_id,
             }),
             task_id: self
                 .shared_runtime_state
@@ -194,15 +201,14 @@ impl RootRuntime {
             .entry(parent_address.to_string())
             .or_default();
         if gaps.lifetime_id < parent_lifetime_id {
-            gaps.lifetime_id = parent_lifetime_id;
-            gaps.gaps.clear();
+            gaps.reset(parent_lifetime_id);
         }
         if gaps.lifetime_id > parent_lifetime_id {
             // TODO: This would mean that there is a system bug.
             unreachable!()
         }
 
-        gaps.gaps.add(request_id).is_seen()
+        gaps.add(request_id).is_seen()
     }
 
     pub fn do_local_work<F, T, FutFn>(
@@ -252,7 +258,7 @@ impl RootRuntime {
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
-            let failed_task_ids = {
+            let failed_local_tasks = {
                 self.shared_runtime_state
                     .failed_local_tasks
                     .lock()
@@ -274,7 +280,7 @@ impl RootRuntime {
                     current_runtime_info: Some(CurrentRuntimeInfo {
                         lifetime_id: local_lifetime_id,
                         stats: None,
-                        failed_task_ids,
+                        failed_local_tasks,
                     }),
                 })
                 .await
@@ -325,25 +331,25 @@ impl RootRuntime {
 
                 // task_failure
                 for (address, runtime_info) in &address_to_runtime_info {
-                    if let Some(previous_runtime_info) =
-                        previous_address_to_runtime_info.get(address)
-                    {
-                        for task_failure in &runtime_info.task_failures {
-                            if !previous_runtime_info.task_failures.contains(&task_failure) {
-                                self.shared_runtime_state.d_store.task_failure(
-                                    address,
-                                    task_failure.lifetime_id,
-                                    task_failure.task_id,
-                                );
+                    for task_failure in &runtime_info.task_failures {
+                        self.shared_runtime_state.d_store.task_failure(
+                            address,
+                            task_failure.lifetime_id,
+                            task_failure.task_id,
+                        );
+
+                        for request in &task_failure.requests {
+                            if request.address == self.shared_runtime_state.local_server_address {
+                                if let Some(gaps) = self
+                                    .shared_runtime_state
+                                    .address_to_gaps
+                                    .lock()
+                                    .unwrap()
+                                    .get_mut(address)
+                                {
+                                    gaps.add(request.request_id);
+                                }
                             }
-                        }
-                    } else {
-                        for task_failure in &runtime_info.task_failures {
-                            self.shared_runtime_state.d_store.task_failure(
-                                address,
-                                task_failure.lifetime_id,
-                                task_failure.task_id,
-                            );
                         }
                     }
                 }
@@ -429,6 +435,7 @@ enum Call {
 #[derive(Debug, Default)]
 struct InnerRuntime {
     calls: HashMap<DStoreId, Call>,
+    requests: Vec<RequestId>,
     stopwatch: Stopwatch,
 }
 
@@ -485,16 +492,37 @@ impl Runtime {
             if parent_runtime_info.lifetime_id < self.parent_info.lifetime_id {
                 return Err(Error::System);
             }
-            if parent_runtime_info.lifetime_id == self.parent_info.lifetime_id
-                && parent_runtime_info.task_failures.contains(&TaskFailure {
-                    lifetime_id: self.parent_info.lifetime_id,
-                    task_id: self.parent_info.task_id,
-                })
-            {
-                return Err(Error::System);
+
+            if parent_runtime_info.lifetime_id == self.parent_info.lifetime_id {
+                let mut failure = false;
+                for task_failure in &parent_runtime_info.task_failures {
+                    if task_failure.lifetime_id == self.parent_info.lifetime_id
+                        && task_failure.task_id == self.parent_info.task_id
+                    {
+                        failure = true;
+                        break;
+                    }
+                }
+                if failure {
+                    return Err(Error::System);
+                }
             }
         }
         Ok(())
+    }
+
+    fn next_request_id(&self, address: &str) -> u64 {
+        let id = self
+            .shared_runtime_state
+            .next_request_id
+            .lock()
+            .unwrap()
+            .next(address);
+        self.inner.lock().unwrap().requests.push(RequestId {
+            address: address.to_string(),
+            request_id: id,
+        });
+        id
     }
 
     async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
@@ -540,6 +568,9 @@ impl Runtime {
                             .schedule_fn(&work.fn_name)
                             .unwrap()
                     };
+
+                    let request_id = self.next_request_id(&address);
+
                     let d_store_id = self
                         .shared_runtime_state
                         .peer_worker_client
@@ -547,6 +578,7 @@ impl Runtime {
                             &self.shared_runtime_state.local_server_address,
                             self.lifetime_id,
                             self.task_id,
+                            request_id,
                             &address,
                             work.clone(),
                         )
@@ -714,11 +746,16 @@ impl Runtime {
             .d_store
             .local_task_failure(d_store_id);
 
+        // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
+        // will be handled by the lifetime failover logic.
         let mut failed_local_tasks = self.shared_runtime_state.failed_local_tasks.lock().unwrap();
         // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
         // will be handled by the lifetime failover logic.
         if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
-            failed_local_tasks.push(self.task_id);
+            failed_local_tasks.push(FailedLocalTask {
+                task_id: self.task_id,
+                requests: self.inner.lock().unwrap().requests.clone(),
+            });
         }
     }
 
@@ -829,6 +866,8 @@ impl Runtime {
                 .unwrap()
         };
 
+        let request_id = self.next_request_id(&address);
+
         let d_store_id = self
             .shared_runtime_state
             .peer_worker_client
@@ -836,6 +875,7 @@ impl Runtime {
                 &self.shared_runtime_state.local_server_address,
                 self.lifetime_id,
                 self.task_id,
+                request_id,
                 &address,
                 work.clone(),
             )
@@ -893,6 +933,7 @@ struct SharedRuntimeClientState {
     next_task_id: u64,
 
     fn_name_to_addresses: FnIndex,
+    next_request_id: Seq,
 }
 
 pub struct RootRuntimeClient {
@@ -963,6 +1004,7 @@ impl RootRuntimeClient {
                     address: client_id,
                     current_runtime_info: Some(CurrentRuntimeInfo {
                         lifetime_id,
+                        // TODO: failed local tasks.
                         ..Default::default()
                     }),
                 })
@@ -993,6 +1035,7 @@ impl RootRuntimeClient {
             task_id,
 
             calls: Mutex::new(HashMap::new()),
+            requests: Mutex::default(),
             dfut_retries: DFUT_RETRIES,
         }
     }
@@ -1016,10 +1059,20 @@ pub struct RuntimeClient {
     task_id: u64,
 
     calls: Mutex<HashMap<DStoreId, ClientCall>>,
+    requests: Mutex<Vec<RequestId>>,
     dfut_retries: usize,
 }
 
 impl RuntimeClient {
+    fn next_request_id(&self, address: &str) -> u64 {
+        let id = self.shared.lock().unwrap().next_request_id.next(address);
+        self.requests.lock().unwrap().push(RequestId {
+            address: address.to_string(),
+            request_id: id,
+        });
+        id
+    }
+
     pub async fn do_remote_work<I, T>(&self, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
@@ -1039,9 +1092,19 @@ impl RuntimeClient {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         };
+
+        let request_id = self.next_request_id(&address);
+
         let d_store_id = self
             .peer_worker_client
-            .do_work(&client_id, lifetime_id, self.task_id, &address, w.clone())
+            .do_work(
+                &client_id,
+                lifetime_id,
+                self.task_id,
+                request_id,
+                &address,
+                w.clone(),
+            )
             .await?;
 
         self.calls
@@ -1100,9 +1163,18 @@ impl RuntimeClient {
                         (client_id, lifetime_id, task_id, address)
                     };
 
+                    let request_id = self.next_request_id(&address);
+
                     let d_store_id = self
                         .peer_worker_client
-                        .do_work(&client_id, lifetime_id, task_id, &address, work.clone())
+                        .do_work(
+                            &client_id,
+                            lifetime_id,
+                            task_id,
+                            request_id,
+                            &address,
+                            work.clone(),
+                        )
                         .await?;
 
                     let t: DResult<T> = self.d_store_client.get_or_watch(d_store_id.clone()).await;
