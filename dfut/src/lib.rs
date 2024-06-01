@@ -17,6 +17,7 @@ mod gaps;
 mod global_scheduler;
 mod peer_work;
 mod runtime;
+mod seq;
 mod services;
 mod sleep;
 mod stopwatch;

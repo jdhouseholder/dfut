@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,7 +8,7 @@ use tonic::{
     Code,
 };
 
-use crate::{d_store::DStoreId, work::Work, DResult, Error};
+use crate::{d_store::DStoreId, seq::Seq, work::Work, DResult, Error};
 
 use crate::services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest};
 
@@ -18,7 +17,7 @@ const WORKER_SERVER_CLIENT_CACHE_SIZE: usize = 20;
 #[derive(Debug, Clone)]
 pub(crate) struct PeerWorkerClient {
     worker_service_client_cache: Arc<Mutex<LruCache<String, WorkerServiceClient<Channel>>>>,
-    peer_to_next_request_id: Arc<Mutex<HashMap<String, u64>>>,
+    peer_to_next_request_id: Arc<Mutex<Seq>>,
 }
 
 impl PeerWorkerClient {
@@ -44,18 +43,7 @@ impl PeerWorkerClient {
     }
 
     fn take_next_request_id(&self, address: &str) -> u64 {
-        let mut m = self.peer_to_next_request_id.lock().unwrap();
-        match m.get_mut(address) {
-            Some(next_request_id) => {
-                let id = *next_request_id;
-                *next_request_id += 1;
-                id
-            }
-            None => {
-                m.insert(address.to_string(), 1);
-                0
-            }
-        }
+        self.peer_to_next_request_id.lock().unwrap().next(address)
     }
 
     pub(crate) async fn do_work(
