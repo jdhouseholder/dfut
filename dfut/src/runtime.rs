@@ -6,8 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use metrics::{counter, histogram};
-use rand::seq::SliceRandom;
+use metrics::histogram;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tonic::{
@@ -19,8 +18,10 @@ use crate::{
     d_fut::DFut,
     d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
-    gaps,
+    fn_index::FnIndex,
+    gaps::LifetimeScopedGaps,
     peer_work::PeerWorkerClient,
+    rpc_context::RpcContext,
     seq::Seq,
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
@@ -40,23 +41,6 @@ use crate::{
     DResult, Error,
 };
 
-#[derive(Debug, Default)]
-struct LifetimeScopedGaps {
-    lifetime_id: u64,
-    gaps: gaps::Gaps,
-}
-
-impl LifetimeScopedGaps {
-    fn reset(&mut self, lifetime_id: u64) {
-        self.lifetime_id = lifetime_id;
-        self.gaps.clear();
-    }
-
-    fn add(&mut self, lifetime_id: u64) -> gaps::GapState {
-        self.gaps.add(lifetime_id)
-    }
-}
-
 const DFUT_RETRIES: usize = 10;
 
 #[derive(Debug)]
@@ -69,7 +53,7 @@ struct SharedRuntimeState {
     peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
 
-    address_to_gaps: Mutex<HashMap<String, LifetimeScopedGaps>>,
+    address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
     address_to_runtime_info: Mutex<HashMap<String, RuntimeInfo>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
@@ -110,7 +94,16 @@ impl RootRuntime {
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
         let next_task_id = AtomicU64::new(0);
 
-        let d_store = Arc::new(DStore::new(local_server_address, &lifetime_id).await);
+        let address_to_gaps = Arc::default();
+
+        let d_store = Arc::new(
+            DStore::new(
+                local_server_address,
+                &lifetime_id,
+                Arc::clone(&address_to_gaps),
+            )
+            .await,
+        );
 
         Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
@@ -123,7 +116,7 @@ impl RootRuntime {
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store,
 
-                address_to_gaps: Mutex::default(),
+                address_to_gaps,
                 address_to_runtime_info: Mutex::default(),
                 lifetime_id,
                 next_task_id,
@@ -169,6 +162,8 @@ impl RootRuntime {
                 .next_task_id
                 .fetch_add(1, Ordering::SeqCst),
             inner: Arc::default(),
+
+            requests: Arc::default(),
         }
     }
 
@@ -200,10 +195,10 @@ impl RootRuntime {
         let gaps = address_to_gaps
             .entry(parent_address.to_string())
             .or_default();
-        if gaps.lifetime_id < parent_lifetime_id {
+        if gaps.lifetime_id() < parent_lifetime_id {
             gaps.reset(parent_lifetime_id);
         }
-        if gaps.lifetime_id > parent_lifetime_id {
+        if gaps.lifetime_id() > parent_lifetime_id {
             // TODO: This would mean that there is a system bug.
             unreachable!()
         }
@@ -435,7 +430,6 @@ enum Call {
 #[derive(Debug, Default)]
 struct InnerRuntime {
     calls: HashMap<DStoreId, Call>,
-    requests: Vec<RequestId>,
     stopwatch: Stopwatch,
 }
 
@@ -447,6 +441,7 @@ pub struct Runtime {
     parent_info: Arc<ParentInfo>,
     task_id: u64,
     inner: Arc<Mutex<InnerRuntime>>,
+    requests: Arc<Mutex<Vec<RequestId>>>,
 }
 
 impl Runtime {
@@ -511,6 +506,15 @@ impl Runtime {
         Ok(())
     }
 
+    fn rpc_context(&self) -> RpcContext {
+        RpcContext {
+            local_address: self.shared_runtime_state.local_server_address.clone(),
+            lifetime_id: self.lifetime_id,
+            next_request_id: Arc::clone(&self.shared_runtime_state.next_request_id),
+            requests: Arc::clone(&self.requests),
+        }
+    }
+
     fn next_request_id(&self, address: &str) -> u64 {
         let id = self
             .shared_runtime_state
@@ -518,7 +522,7 @@ impl Runtime {
             .lock()
             .unwrap()
             .next(address);
-        self.inner.lock().unwrap().requests.push(RequestId {
+        self.requests.lock().unwrap().push(RequestId {
             address: address.to_string(),
             request_id: id,
         });
@@ -587,7 +591,7 @@ impl Runtime {
                     let t: DResult<T> = self
                         .shared_runtime_state
                         .d_store
-                        .get_or_watch(d_store_id.clone())
+                        .get_or_watch(&self.rpc_context(), d_store_id.clone())
                         .await;
 
                     if let Ok(t) = t {
@@ -635,7 +639,7 @@ impl Runtime {
         let t = self
             .shared_runtime_state
             .d_store
-            .get_or_watch(d_fut.d_store_id.clone())
+            .get_or_watch(&self.rpc_context(), d_fut.d_store_id.clone())
             .await;
 
         if let Err(_) = &t {
@@ -660,7 +664,7 @@ impl Runtime {
 
         self.shared_runtime_state
             .d_store
-            .decrement_or_remove(d_fut.d_store_id, 1)
+            .decrement_or_remove(&self.rpc_context(), d_fut.d_store_id, 1)
             .await?;
 
         self.start_stopwatch();
@@ -679,7 +683,7 @@ impl Runtime {
 
         self.shared_runtime_state
             .d_store
-            .share(&d_fut.d_store_id, 1)
+            .share(&self.rpc_context(), &d_fut.d_store_id, 1)
             .await?;
 
         self.start_stopwatch();
@@ -698,7 +702,7 @@ impl Runtime {
 
         self.shared_runtime_state
             .d_store
-            .share(&d_fut.d_store_id, n)
+            .share(&self.rpc_context(), &d_fut.d_store_id, n)
             .await?;
 
         self.start_stopwatch();
@@ -732,6 +736,8 @@ impl Runtime {
                 .next_task_id
                 .fetch_add(1, Ordering::SeqCst),
             inner: Arc::default(),
+
+            requests: Arc::default(),
         }
     }
 
@@ -754,7 +760,7 @@ impl Runtime {
         if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
             failed_local_tasks.push(FailedLocalTask {
                 task_id: self.task_id,
-                requests: self.inner.lock().unwrap().requests.clone(),
+                requests: self.requests.lock().unwrap().clone(),
             });
         }
     }
@@ -887,25 +893,6 @@ impl Runtime {
     }
 }
 
-#[derive(Debug, Default)]
-struct FnIndex {
-    m: HashMap<String, Vec<String>>,
-}
-
-impl FnIndex {
-    fn schedule_fn(&self, fn_name: &str) -> Option<String> {
-        self.m
-            .get(fn_name)?
-            .choose(&mut rand::thread_rng())
-            .map(|s| {
-                counter!("schedule_fn", "fn_name" => fn_name.to_string(), "choice" => s.clone())
-                    .increment(1);
-                s.clone()
-            })
-            .clone()
-    }
-}
-
 fn compute_fn_index(
     address_to_runtime_info: &HashMap<String, RuntimeInfo>,
     current_address: &str,
@@ -923,7 +910,7 @@ fn compute_fn_index(
             }
         }
     }
-    FnIndex { m }
+    FnIndex::new(m)
 }
 
 #[derive(Debug, Default)]
@@ -933,11 +920,11 @@ struct SharedRuntimeClientState {
     next_task_id: u64,
 
     fn_name_to_addresses: FnIndex,
-    next_request_id: Seq,
 }
 
 pub struct RootRuntimeClient {
     shared: Arc<Mutex<SharedRuntimeClientState>>,
+    next_request_id: Arc<Mutex<Seq>>,
     peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 }
@@ -952,6 +939,7 @@ impl RootRuntimeClient {
         });
         Self {
             shared,
+            next_request_id: Arc::default(),
             peer_worker_client: PeerWorkerClient::new(),
             d_store_client: DStoreClient::new(),
         }
@@ -1004,7 +992,7 @@ impl RootRuntimeClient {
                     address: client_id,
                     current_runtime_info: Some(CurrentRuntimeInfo {
                         lifetime_id,
-                        // TODO: failed local tasks.
+                        // TODO: share failed local tasks.
                         ..Default::default()
                     }),
                 })
@@ -1030,12 +1018,13 @@ impl RootRuntimeClient {
 
         RuntimeClient {
             shared: Arc::clone(&self.shared),
+            next_request_id: Arc::clone(&self.next_request_id),
             peer_worker_client: self.peer_worker_client.clone(),
             d_store_client: self.d_store_client.clone(),
             task_id,
 
             calls: Mutex::new(HashMap::new()),
-            requests: Mutex::default(),
+            requests: Arc::default(),
             dfut_retries: DFUT_RETRIES,
         }
     }
@@ -1053,19 +1042,30 @@ enum ClientCall {
 // TODO: retry in the client too.
 pub struct RuntimeClient {
     shared: Arc<Mutex<SharedRuntimeClientState>>,
+    next_request_id: Arc<Mutex<Seq>>,
     peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 
     task_id: u64,
 
     calls: Mutex<HashMap<DStoreId, ClientCall>>,
-    requests: Mutex<Vec<RequestId>>,
+    requests: Arc<Mutex<Vec<RequestId>>>,
     dfut_retries: usize,
 }
 
 impl RuntimeClient {
+    fn rpc_context(&self) -> RpcContext {
+        let shared = self.shared.lock().unwrap();
+        RpcContext {
+            local_address: shared.client_id.clone(),
+            lifetime_id: shared.lifetime_id,
+            next_request_id: Arc::clone(&self.next_request_id),
+            requests: Arc::clone(&self.requests),
+        }
+    }
+
     fn next_request_id(&self, address: &str) -> u64 {
-        let id = self.shared.lock().unwrap().next_request_id.next(address);
+        let id = self.next_request_id.lock().unwrap().next(address);
         self.requests.lock().unwrap().push(RequestId {
             address: address.to_string(),
             request_id: id,
@@ -1177,7 +1177,10 @@ impl RuntimeClient {
                         )
                         .await?;
 
-                    let t: DResult<T> = self.d_store_client.get_or_watch(d_store_id.clone()).await;
+                    let t: DResult<T> = self
+                        .d_store_client
+                        .get_or_watch(&self.rpc_context(), d_store_id.clone())
+                        .await;
 
                     if let Ok(t) = t {
                         let v: Arc<dyn ValueTrait> = Arc::new(t.clone());
@@ -1215,7 +1218,7 @@ impl RuntimeClient {
     {
         let t = self
             .d_store_client
-            .get_or_watch(d_fut.d_store_id.clone())
+            .get_or_watch(&self.rpc_context(), d_fut.d_store_id.clone())
             .await;
 
         match t {
@@ -1229,17 +1232,21 @@ impl RuntimeClient {
         T: DeserializeOwned,
     {
         self.d_store_client
-            .decrement_or_remove(d_fut.d_store_id, 1)
+            .decrement_or_remove(&self.rpc_context(), d_fut.d_store_id, 1)
             .await
     }
 
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
-        self.d_store_client.share(&d_fut.d_store_id, 1).await?;
+        self.d_store_client
+            .share(&self.rpc_context(), &d_fut.d_store_id, 1)
+            .await?;
         Ok(d_fut.share())
     }
 
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
-        self.d_store_client.share(&d_fut.d_store_id, n).await?;
+        self.d_store_client
+            .share(&self.rpc_context(), &d_fut.d_store_id, n)
+            .await?;
         Ok((0..n).map(|_| d_fut.share()).collect())
     }
 

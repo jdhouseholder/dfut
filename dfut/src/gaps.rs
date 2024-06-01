@@ -61,6 +61,27 @@ impl Gaps {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct LifetimeScopedGaps {
+    lifetime_id: u64,
+    gaps: Gaps,
+}
+
+impl LifetimeScopedGaps {
+    pub fn reset(&mut self, lifetime_id: u64) {
+        self.lifetime_id = lifetime_id;
+        self.gaps.clear();
+    }
+
+    pub fn add(&mut self, request_id: u64) -> GapState {
+        self.gaps.add(request_id)
+    }
+
+    pub fn lifetime_id(&self) -> u64 {
+        self.lifetime_id
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

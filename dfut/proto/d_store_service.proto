@@ -2,10 +2,14 @@ syntax = "proto3";
 package d_store_service;
 
 message GetOrWatchRequest {
-	string address = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 task_id = 3;
-	fixed64 object_id = 4;
+	string remote_address = 1;
+	fixed64 remote_lifetime_id = 2;
+	fixed64 request_id = 3;
+
+	string address = 4;
+	fixed64 lifetime_id = 5;
+	fixed64 task_id = 6;
+	fixed64 object_id = 7;
 }
 
 message GetOrWatchResponse {
@@ -13,24 +17,32 @@ message GetOrWatchResponse {
 }
 
 message ShareNRequest {
-	string address = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 task_id = 3;
-	fixed64 object_id = 4;
+	string remote_address = 1;
+	fixed64 remote_lifetime_id = 2;
+	fixed64 request_id = 3;
 
-	fixed64 n = 5;
+	string address = 4;
+	fixed64 lifetime_id = 5;
+	fixed64 task_id = 6;
+	fixed64 object_id = 7;
+
+	fixed64 n = 8;
 }
 
 message ShareNResponse {
 }
 
 message DecrementOrRemoveRequest {
-	string address = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 task_id = 3;
-	fixed64 object_id = 4;
+	string remote_address = 1;
+	fixed64 remote_lifetime_id = 2;
+	fixed64 request_id = 3;
 
-	fixed64 by = 5;
+	string address = 4;
+	fixed64 lifetime_id = 5;
+	fixed64 task_id = 6;
+	fixed64 object_id = 7;
+
+	fixed64 by = 8;
 }
 
 message DecrementOrRemoveResponse {

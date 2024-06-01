@@ -15,12 +15,16 @@ use tonic::{
     Request, Response, Status,
 };
 
-use crate::{services::worker_service::DoWorkResponse, Error};
-
-use crate::services::d_store_service::{
-    d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
-    DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
-    ShareNRequest, ShareNResponse,
+use crate::{
+    gaps::LifetimeScopedGaps,
+    rpc_context::RpcContext,
+    services::d_store_service::{
+        d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
+        DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
+        ShareNRequest, ShareNResponse,
+    },
+    services::worker_service::DoWorkResponse,
+    Error,
 };
 
 pub(crate) trait ValueTrait:
@@ -219,7 +223,7 @@ impl LocalStore {
         counter!("local_store::share").increment(1);
 
         let mut m = self.m.lock().unwrap();
-        let value = m.get_mut(&key).unwrap();
+        let value = m.get_mut(&key).ok_or(Error::System)?;
         value.ref_count += n;
         Ok(())
     }
@@ -242,6 +246,10 @@ impl LocalStore {
         }
 
         remove
+    }
+
+    fn exists(&self, id: &DStoreId) -> bool {
+        self.m.lock().unwrap().contains_key(id)
     }
 
     fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
@@ -341,17 +349,23 @@ pub(crate) struct DStore {
     current_address: String,
     lifetime_id: Arc<AtomicU64>,
     next_object_id: AtomicU64,
+    address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
 
     local_store: LocalStore,
     d_store_client: DStoreClient,
 }
 
 impl DStore {
-    pub(crate) async fn new(current_address: &str, lifetime_id: &Arc<AtomicU64>) -> Self {
+    pub(crate) async fn new(
+        current_address: &str,
+        lifetime_id: &Arc<AtomicU64>,
+        address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
+    ) -> Self {
         Self {
             current_address: current_address.to_string(),
             lifetime_id: Arc::clone(&lifetime_id),
             next_object_id: AtomicU64::new(0),
+            address_to_gaps,
 
             local_store: Default::default(),
             d_store_client: DStoreClient::default(),
@@ -376,12 +390,16 @@ impl DStore {
         self.local_store.insert(key, t)
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
+    pub(crate) async fn get_or_watch<T>(
+        &self,
+        rpc_context: &RpcContext,
+        key: DStoreId,
+    ) -> Result<T, Error>
     where
         T: DeserializeOwned + Clone + Send + Sync + 'static,
     {
         if key.address != self.current_address {
-            let t: T = self.d_store_client.get_or_watch(key).await?;
+            let t: T = self.d_store_client.get_or_watch(rpc_context, key).await?;
             Ok(t)
         } else {
             let t: Arc<T> = self
@@ -395,9 +413,14 @@ impl DStore {
         }
     }
 
-    pub(crate) async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
+    pub(crate) async fn share(
+        &self,
+        rpc_context: &RpcContext,
+        key: &DStoreId,
+        n: u64,
+    ) -> Result<(), Error> {
         if key.address != self.current_address {
-            return self.d_store_client.share(key, n).await;
+            return self.d_store_client.share(rpc_context, key, n).await;
         }
 
         self.local_store.share(key, n).await?;
@@ -405,9 +428,17 @@ impl DStore {
         Ok(())
     }
 
-    pub(crate) async fn decrement_or_remove(&self, key: DStoreId, by: u64) -> Result<(), Error> {
+    pub(crate) async fn decrement_or_remove(
+        &self,
+        rpc_context: &RpcContext,
+        key: DStoreId,
+        by: u64,
+    ) -> Result<(), Error> {
         if key.address != self.current_address {
-            return self.d_store_client.decrement_or_remove(key, by).await;
+            return self
+                .d_store_client
+                .decrement_or_remove(rpc_context, key, by)
+                .await;
         }
 
         self.local_store.decrement_or_remove(&key, by).await;
@@ -444,6 +475,27 @@ impl DStore {
             parent_task_id,
             request_id,
         )
+    }
+
+    fn have_seen_request_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        request_id: u64,
+    ) -> bool {
+        let mut address_to_gaps = self.address_to_gaps.lock().unwrap();
+        let gaps = address_to_gaps
+            .entry(parent_address.to_string())
+            .or_default();
+        if gaps.lifetime_id() < parent_lifetime_id {
+            gaps.reset(parent_lifetime_id);
+        }
+        if gaps.lifetime_id() > parent_lifetime_id {
+            // TODO: This would mean that there is a system bug.
+            unreachable!()
+        }
+
+        gaps.add(request_id).is_seen()
     }
 }
 
@@ -495,7 +547,11 @@ impl DStoreClient {
         }
     }
 
-    pub(crate) async fn get_or_watch<T>(&self, key: DStoreId) -> Result<T, Error>
+    pub(crate) async fn get_or_watch<T>(
+        &self,
+        rpc_context: &RpcContext,
+        key: DStoreId,
+    ) -> Result<T, Error>
     where
         T: DeserializeOwned + Clone + Send + Sync + 'static,
     {
@@ -510,13 +566,18 @@ impl DStoreClient {
         } {
             // MUST decrement remote.
             // TODO: only don't error on not found.
-            let _ = self.decrement_or_remove(key, 1).await;
+            let _ = self.decrement_or_remove(rpc_context, key, 1).await;
             return Ok((*v).clone());
         }
 
         let mut client = self.get_or_connect(&key.address).await;
+        let request_id = rpc_context.next_request_id(&key.address);
         let GetOrWatchResponse { object } = client
             .get_or_watch(GetOrWatchRequest {
+                remote_address: rpc_context.local_address.clone(),
+                remote_lifetime_id: rpc_context.lifetime_id,
+                request_id,
+
                 address: key.address.clone(),
                 lifetime_id: key.lifetime_id,
                 task_id: key.task_id,
@@ -537,10 +598,20 @@ impl DStoreClient {
         Ok(t)
     }
 
-    pub(crate) async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {
+    pub(crate) async fn share(
+        &self,
+        rpc_context: &RpcContext,
+        key: &DStoreId,
+        n: u64,
+    ) -> Result<(), Error> {
         let mut client = self.get_or_connect(&key.address).await;
+        let request_id = rpc_context.next_request_id(&key.address);
         let _ = client
             .share_n(ShareNRequest {
+                remote_address: rpc_context.local_address.clone(),
+                remote_lifetime_id: rpc_context.lifetime_id,
+                request_id,
+
                 address: key.address.clone(),
                 lifetime_id: key.lifetime_id,
                 task_id: key.task_id,
@@ -552,8 +623,14 @@ impl DStoreClient {
         return Ok(());
     }
 
-    pub(crate) async fn decrement_or_remove(&self, key: DStoreId, by: u64) -> Result<(), Error> {
+    pub(crate) async fn decrement_or_remove(
+        &self,
+        rpc_context: &RpcContext,
+        key: DStoreId,
+        by: u64,
+    ) -> Result<(), Error> {
         let mut client = self.get_or_connect(&key.address).await;
+        let request_id = rpc_context.next_request_id(&key.address);
         let DStoreId {
             address,
             lifetime_id,
@@ -562,6 +639,10 @@ impl DStoreClient {
         } = key;
         let _ = client
             .decrement_or_remove(DecrementOrRemoveRequest {
+                remote_address: rpc_context.local_address.clone(),
+                remote_lifetime_id: rpc_context.lifetime_id,
+                request_id,
+
                 address,
                 lifetime_id,
                 task_id,
@@ -583,6 +664,10 @@ impl DStoreService for Arc<DStore> {
         request: Request<GetOrWatchRequest>,
     ) -> Result<Response<GetOrWatchResponse>, Status> {
         let GetOrWatchRequest {
+            remote_address,
+            remote_lifetime_id,
+            request_id,
+
             address,
             lifetime_id,
             task_id,
@@ -600,6 +685,12 @@ impl DStoreService for Arc<DStore> {
             object_id,
         };
 
+        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+            if self.local_store.share(&id, 1).await.is_err() {
+                return Err(Status::not_found("Invalid id"));
+            }
+        }
+
         let t: Arc<dyn ValueTrait> = self
             .local_store
             .get_or_watch(id.clone())
@@ -615,6 +706,10 @@ impl DStoreService for Arc<DStore> {
         request: Request<ShareNRequest>,
     ) -> Result<Response<ShareNResponse>, Status> {
         let ShareNRequest {
+            remote_address,
+            remote_lifetime_id,
+            request_id,
+
             address,
             lifetime_id,
             task_id,
@@ -624,6 +719,10 @@ impl DStoreService for Arc<DStore> {
 
         if lifetime_id < self.lifetime_id.load(Ordering::SeqCst) {
             return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
+        }
+
+        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+            return Ok(Response::new(ShareNResponse::default()));
         }
 
         let id = DStoreId {
@@ -643,6 +742,10 @@ impl DStoreService for Arc<DStore> {
         request: Request<DecrementOrRemoveRequest>,
     ) -> Result<Response<DecrementOrRemoveResponse>, Status> {
         let DecrementOrRemoveRequest {
+            remote_address,
+            remote_lifetime_id,
+            request_id,
+
             address,
             lifetime_id,
             task_id,
@@ -654,18 +757,19 @@ impl DStoreService for Arc<DStore> {
             return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
         }
 
-        let removed = self
-            .local_store
-            .decrement_or_remove(
-                &DStoreId {
-                    address,
-                    lifetime_id,
-                    task_id,
-                    object_id,
-                },
-                by,
-            )
-            .await;
+        let id = DStoreId {
+            address,
+            lifetime_id,
+            task_id,
+            object_id,
+        };
+
+        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+            let exists = self.local_store.exists(&id);
+            return Ok(Response::new(DecrementOrRemoveResponse { removed: exists }));
+        }
+
+        let removed = self.local_store.decrement_or_remove(&id, by).await;
 
         Ok(Response::new(DecrementOrRemoveResponse { removed }))
     }
