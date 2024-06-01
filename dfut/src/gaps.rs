@@ -1,5 +1,8 @@
-use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GapState {
@@ -79,6 +82,40 @@ impl LifetimeScopedGaps {
 
     pub fn lifetime_id(&self) -> u64 {
         self.lifetime_id
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AddressToGaps {
+    address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
+}
+
+impl AddressToGaps {
+    pub fn have_seen_request_id(
+        &self,
+        parent_address: &str,
+        parent_lifetime_id: u64,
+        request_id: u64,
+    ) -> bool {
+        let mut address_to_gaps = self.address_to_gaps.lock().unwrap();
+        let gaps = address_to_gaps
+            .entry(parent_address.to_string())
+            .or_default();
+        if gaps.lifetime_id() < parent_lifetime_id {
+            gaps.reset(parent_lifetime_id);
+        }
+        if gaps.lifetime_id() > parent_lifetime_id {
+            // TODO: This would mean that there is a system bug.
+            unreachable!()
+        }
+
+        gaps.add(request_id).is_seen()
+    }
+
+    pub fn try_reset(&self, address: &str, lifetime_id: u64) {
+        if let Some(gaps) = self.address_to_gaps.lock().unwrap().get_mut(address) {
+            gaps.reset(lifetime_id);
+        }
     }
 }
 

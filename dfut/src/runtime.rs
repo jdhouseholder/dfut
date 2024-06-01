@@ -19,7 +19,7 @@ use crate::{
     d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreClient, DStoreId, ParentInfo, ValueTrait},
     fn_index::FnIndex,
-    gaps::LifetimeScopedGaps,
+    gaps::AddressToGaps,
     peer_work::PeerWorkerClient,
     rpc_context::RpcContext,
     seq::Seq,
@@ -53,7 +53,7 @@ struct SharedRuntimeState {
     peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
 
-    address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
+    address_to_gaps: AddressToGaps,
     address_to_runtime_info: Mutex<HashMap<String, RuntimeInfo>>,
     lifetime_id: Arc<AtomicU64>,
     next_task_id: AtomicU64,
@@ -94,15 +94,10 @@ impl RootRuntime {
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
         let next_task_id = AtomicU64::new(0);
 
-        let address_to_gaps = Arc::default();
+        let address_to_gaps = AddressToGaps::default();
 
         let d_store = Arc::new(
-            DStore::new(
-                local_server_address,
-                &lifetime_id,
-                Arc::clone(&address_to_gaps),
-            )
-            .await,
+            DStore::new(local_server_address, &lifetime_id, address_to_gaps.clone()).await,
         );
 
         Self {
@@ -185,27 +180,6 @@ impl RootRuntime {
         Ok(())
     }
 
-    fn have_seen_request_id(
-        &self,
-        parent_address: &str,
-        parent_lifetime_id: u64,
-        request_id: u64,
-    ) -> bool {
-        let mut address_to_gaps = self.shared_runtime_state.address_to_gaps.lock().unwrap();
-        let gaps = address_to_gaps
-            .entry(parent_address.to_string())
-            .or_default();
-        if gaps.lifetime_id() < parent_lifetime_id {
-            gaps.reset(parent_lifetime_id);
-        }
-        if gaps.lifetime_id() > parent_lifetime_id {
-            // TODO: This would mean that there is a system bug.
-            unreachable!()
-        }
-
-        gaps.add(request_id).is_seen()
-    }
-
     pub fn do_local_work<F, T, FutFn>(
         &self,
         parent_address: &str,
@@ -222,7 +196,11 @@ impl RootRuntime {
     {
         self.validate_lifetime_id(parent_address, parent_lifetime_id)?;
 
-        if self.have_seen_request_id(parent_address, parent_lifetime_id, request_id) {
+        if self
+            .shared_runtime_state
+            .address_to_gaps
+            .have_seen_request_id(parent_address, parent_lifetime_id, request_id)
+        {
             return self
                 .shared_runtime_state
                 .d_store
@@ -310,16 +288,9 @@ impl RootRuntime {
                             self.shared_runtime_state
                                 .d_store
                                 .worker_failure(address, runtime_info.lifetime_id);
-
-                            if let Some(gaps) = self
-                                .shared_runtime_state
+                            self.shared_runtime_state
                                 .address_to_gaps
-                                .lock()
-                                .unwrap()
-                                .get_mut(address)
-                            {
-                                gaps.reset(runtime_info.lifetime_id);
-                            }
+                                .try_reset(address, runtime_info.lifetime_id);
                         }
                     }
                 }
@@ -335,15 +306,9 @@ impl RootRuntime {
 
                         for request in &task_failure.requests {
                             if request.address == self.shared_runtime_state.local_server_address {
-                                if let Some(gaps) = self
-                                    .shared_runtime_state
+                                self.shared_runtime_state
                                     .address_to_gaps
-                                    .lock()
-                                    .unwrap()
-                                    .get_mut(address)
-                                {
-                                    gaps.add(request.request_id);
-                                }
+                                    .try_reset(address, runtime_info.lifetime_id);
                             }
                         }
                     }

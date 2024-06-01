@@ -16,7 +16,7 @@ use tonic::{
 };
 
 use crate::{
-    gaps::LifetimeScopedGaps,
+    gaps::AddressToGaps,
     rpc_context::RpcContext,
     services::d_store_service::{
         d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
@@ -349,7 +349,7 @@ pub(crate) struct DStore {
     current_address: String,
     lifetime_id: Arc<AtomicU64>,
     next_object_id: AtomicU64,
-    address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
+    address_to_gaps: AddressToGaps,
 
     local_store: LocalStore,
     d_store_client: DStoreClient,
@@ -359,7 +359,7 @@ impl DStore {
     pub(crate) async fn new(
         current_address: &str,
         lifetime_id: &Arc<AtomicU64>,
-        address_to_gaps: Arc<Mutex<HashMap<String, LifetimeScopedGaps>>>,
+        address_to_gaps: AddressToGaps,
     ) -> Self {
         Self {
             current_address: current_address.to_string(),
@@ -475,27 +475,6 @@ impl DStore {
             parent_task_id,
             request_id,
         )
-    }
-
-    fn have_seen_request_id(
-        &self,
-        parent_address: &str,
-        parent_lifetime_id: u64,
-        request_id: u64,
-    ) -> bool {
-        let mut address_to_gaps = self.address_to_gaps.lock().unwrap();
-        let gaps = address_to_gaps
-            .entry(parent_address.to_string())
-            .or_default();
-        if gaps.lifetime_id() < parent_lifetime_id {
-            gaps.reset(parent_lifetime_id);
-        }
-        if gaps.lifetime_id() > parent_lifetime_id {
-            // TODO: This would mean that there is a system bug.
-            unreachable!()
-        }
-
-        gaps.add(request_id).is_seen()
     }
 }
 
@@ -685,7 +664,11 @@ impl DStoreService for Arc<DStore> {
             object_id,
         };
 
-        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+        if self.address_to_gaps.have_seen_request_id(
+            &remote_address,
+            remote_lifetime_id,
+            request_id,
+        ) {
             if self.local_store.share(&id, 1).await.is_err() {
                 return Err(Status::not_found("Invalid id"));
             }
@@ -721,7 +704,11 @@ impl DStoreService for Arc<DStore> {
             return Err(Status::not_found(LIFE_TIME_TOO_OLD.to_string()));
         }
 
-        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+        if self.address_to_gaps.have_seen_request_id(
+            &remote_address,
+            remote_lifetime_id,
+            request_id,
+        ) {
             return Ok(Response::new(ShareNResponse::default()));
         }
 
@@ -764,7 +751,11 @@ impl DStoreService for Arc<DStore> {
             object_id,
         };
 
-        if self.have_seen_request_id(&remote_address, remote_lifetime_id, request_id) {
+        if self.address_to_gaps.have_seen_request_id(
+            &remote_address,
+            remote_lifetime_id,
+            request_id,
+        ) {
             let exists = self.local_store.exists(&id);
             return Ok(Response::new(DecrementOrRemoveResponse { removed: exists }));
         }
