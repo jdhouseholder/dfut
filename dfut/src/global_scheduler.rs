@@ -180,6 +180,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         request: Request<HeartBeatRequest>,
     ) -> Result<Response<HeartBeatResponse>, Status> {
         let HeartBeatRequest {
+            request_id,
             address,
             current_runtime_info,
         } = request.into_inner();
@@ -188,6 +189,8 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         };
 
         let mut inner = self.inner.lock().unwrap();
+
+        // TODO: track max request_id and if < max then return error.
 
         let current_lifetime_id = current_runtime_info.lifetime_id;
 

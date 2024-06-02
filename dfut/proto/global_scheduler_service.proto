@@ -69,8 +69,9 @@ message RuntimeInfo {
 }
 
 message HeartBeatRequest {
-	string address = 1;
-	CurrentRuntimeInfo current_runtime_info = 2;
+	fixed64 request_id = 1;
+	string address = 2;
+	CurrentRuntimeInfo current_runtime_info = 3;
 }
 
 message HeartBeatResponse {

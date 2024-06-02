@@ -11,6 +11,7 @@ pub struct WorkerServerConfig {
 }
 
 mod client_pool;
+mod consts;
 mod d_fut;
 mod d_scheduler;
 mod d_store;
@@ -33,7 +34,10 @@ pub type DResult<T> = Result<T, Error>;
 pub use d_fut::DFut;
 pub use d_scheduler::Where;
 pub use global_scheduler::GlobalScheduler;
-pub use runtime::{RootRuntime, RootRuntimeClient, Runtime, RuntimeClient};
+pub use runtime::{
+    client::{RootRuntimeClient, RuntimeClient},
+    runtime::{RootRuntime, Runtime},
+};
 pub use services::worker_service::{
     worker_service_client::WorkerServiceClient,
     worker_service_server::{WorkerService, WorkerServiceServer},

@@ -3,14 +3,33 @@ use std::collections::HashMap;
 use metrics::counter;
 use rand::seq::SliceRandom;
 
+use crate::services::global_scheduler_service::RuntimeInfo;
+
 #[derive(Debug, Default)]
 pub struct FnIndex {
     m: HashMap<String, Vec<String>>,
 }
 
 impl FnIndex {
-    pub fn new(m: HashMap<String, Vec<String>>) -> Self {
-        Self { m }
+    pub fn compute(
+        address_to_runtime_info: &HashMap<String, RuntimeInfo>,
+        current_address: &str,
+    ) -> Self {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (address, runtime_info) in address_to_runtime_info {
+            if address == current_address {
+                continue;
+            }
+            if let Some(stats) = &runtime_info.stats {
+                for fn_name in stats.fn_stats.keys() {
+                    m.entry(fn_name.to_string())
+                        .or_default()
+                        .push(address.to_string());
+                }
+            }
+        }
+        FnIndex { m }
     }
 
     pub fn schedule_fn(&self, fn_name: &str) -> Option<String> {
