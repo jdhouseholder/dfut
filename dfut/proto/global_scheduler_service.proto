@@ -11,15 +11,6 @@ message RegisterResponse {
 	fixed64 heart_beat_timeout = 2;
 }
 
-message RegisterClientRequest {
-}
-
-message RegisterClientResponse {
-	string client_id = 1;
-	fixed64 lifetime_id = 2;
-	fixed64 heart_beat_timeout = 3;
-}
-
 message FnStats {
 	fixed64 completed = 1;
 	fixed64 pending = 2;
@@ -91,7 +82,6 @@ message RaftStepResponse {
 
 service GlobalSchedulerService {
 	rpc Register(RegisterRequest) returns (RegisterResponse);
-	rpc RegisterClient(RegisterClientRequest) returns (RegisterClientResponse);
 	rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
 	rpc RaftStep(RaftStepRequest) returns (RaftStepResponse);
 }

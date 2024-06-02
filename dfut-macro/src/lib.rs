@@ -240,9 +240,10 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #root_client_ident {
-           pub async fn new(global_scheduler_address: &str) -> Self {
+           pub async fn new(global_scheduler_address: &str, unique_client_id: &str) -> Self {
                let root_runtime = dfut::RootRuntimeClient::new(
-                   global_scheduler_address
+                   global_scheduler_address,
+                   unique_client_id
                ).await;
                Self { root_runtime }
            }

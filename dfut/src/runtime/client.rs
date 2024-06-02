@@ -12,12 +12,12 @@ use crate::{
     d_store::{DStoreClient, DStoreId, ValueTrait},
     fn_index::FnIndex,
     peer_work::PeerWorkerClient,
+    retry::retry,
     rpc_context::RpcContext,
     seq::Seq,
     services::global_scheduler_service::{
         global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
-        HeartBeatRequest, HeartBeatResponse, RegisterClientRequest, RegisterClientResponse,
-        RequestId,
+        HeartBeatRequest, HeartBeatResponse, RegisterRequest, RegisterResponse, RequestId,
     },
     sleep::sleep_with_jitter,
     work::{IntoWork, Work},
@@ -41,31 +41,40 @@ pub struct RootRuntimeClient {
 }
 
 impl RootRuntimeClient {
-    pub async fn new(global_scheduler_address: &str) -> Self {
+    pub async fn new(global_scheduler_address: &str, unique_client_id: &str) -> Self {
         let shared = Arc::new(Mutex::new(SharedRuntimeClientState::default()));
 
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-        let mut global_scheduler = Self::gs_connect(endpoint).await;
 
-        let RegisterClientResponse {
-            client_id,
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+
+        let RegisterResponse {
             lifetime_id,
             heart_beat_timeout,
             ..
-        } = global_scheduler
-            .register_client(RegisterClientRequest {})
-            .await
-            .unwrap()
-            .into_inner();
+        } = retry(&mut client, &endpoint, |mut client| {
+            let address = unique_client_id.to_string();
+            async move {
+                client
+                    .register(RegisterRequest {
+                        address,
+                        ..Default::default()
+                    })
+                    .await
+            }
+        })
+        .await
+        .expect("Unable to register.");
+
         {
             let mut shared = shared.lock().unwrap();
-            shared.client_id = client_id;
+            shared.client_id = unique_client_id.to_string();
             shared.lifetime_id = lifetime_id;
         }
 
         tokio::spawn({
             let shared = Arc::clone(&shared);
-            async move { Self::heart_beat_forever(global_scheduler, shared, heart_beat_timeout).await }
+            async move { Self::heart_beat_forever(client, endpoint, shared, heart_beat_timeout).await }
         });
 
         Self {
@@ -76,18 +85,9 @@ impl RootRuntimeClient {
         }
     }
 
-    async fn gs_connect(endpoint: Endpoint) -> GlobalSchedulerServiceClient<Channel> {
-        for i in 0..5 {
-            if let Ok(client) = GlobalSchedulerServiceClient::connect(endpoint.clone()).await {
-                return client;
-            }
-            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
-        }
-        panic!();
-    }
-
     async fn heart_beat_forever(
-        mut global_scheduler: GlobalSchedulerServiceClient<Channel>,
+        mut client: Option<GlobalSchedulerServiceClient<Channel>>,
+        endpoint: Endpoint,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
         heart_beat_timeout: u64,
     ) {
@@ -102,19 +102,26 @@ impl RootRuntimeClient {
             let HeartBeatResponse {
                 lifetime_id,
                 address_to_runtime_info,
-            } = global_scheduler
-                .heart_beat(HeartBeatRequest {
-                    request_id,
-                    address: client_id,
-                    current_runtime_info: Some(CurrentRuntimeInfo {
-                        lifetime_id,
-                        // TODO: share failed local tasks.
-                        ..Default::default()
-                    }),
-                })
-                .await
-                .unwrap()
-                .into_inner();
+                ..
+            } = retry(&mut client, &endpoint, |mut client| {
+                let client_id = client_id.clone();
+                async move {
+                    client
+                        .heart_beat(HeartBeatRequest {
+                            request_id,
+                            address: client_id,
+                            current_runtime_info: Some(CurrentRuntimeInfo {
+                                lifetime_id,
+                                // TODO: share failed local tasks.
+                                ..Default::default()
+                            }),
+                        })
+                        .await
+                }
+            })
+            .await
+            .unwrap();
+
             request_id += 1;
 
             let i = FnIndex::compute(&address_to_runtime_info, "");

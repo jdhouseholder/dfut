@@ -8,8 +8,7 @@ use tracing::error;
 use crate::services::global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
     FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
-    RegisterClientRequest, RegisterClientResponse, RegisterRequest, RegisterResponse, RuntimeInfo,
-    Stats, TaskFailure,
+    RegisterRequest, RegisterResponse, RuntimeInfo, Stats, TaskFailure,
 };
 
 #[derive(Debug)]
@@ -20,9 +19,9 @@ struct LifetimeLease {
 
 #[derive(Debug, Default)]
 struct InnerGlobalScheduler {
+    max_request_id: HashMap<String, u64>,
     lifetimes: HashMap<String, LifetimeLease>,
     address_to_runtime_info: HashMap<String, RuntimeInfo>,
-    next_client_id: u64,
 }
 
 // TODO: Rename to Global Coordinator Service (or Global Control Service)
@@ -133,49 +132,6 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         }))
     }
 
-    async fn register_client(
-        &self,
-        request: Request<RegisterClientRequest>,
-    ) -> Result<Response<RegisterClientResponse>, Status> {
-        let RegisterClientRequest {} = request.into_inner();
-
-        let mut inner = self.inner.lock().unwrap();
-
-        let id = inner.next_client_id;
-        inner.next_client_id += 1;
-
-        let address = format!("client-id-{id}");
-
-        let lifetime_id = match inner.lifetimes.entry(address.clone()) {
-            Entry::Occupied(ref mut e) => {
-                let l = e.get_mut();
-                l.at = Instant::now();
-                l.id
-            }
-            Entry::Vacant(v) => {
-                v.insert(LifetimeLease {
-                    id: 0,
-                    at: Instant::now(),
-                });
-                0
-            }
-        };
-
-        inner
-            .address_to_runtime_info
-            .entry(address.clone())
-            .or_insert_with(|| RuntimeInfo {
-                lifetime_id,
-                ..Default::default()
-            });
-
-        Ok(Response::new(RegisterClientResponse {
-            client_id: address,
-            lifetime_id,
-            heart_beat_timeout: self.lifetime_timeout.as_millis() as u64,
-        }))
-    }
-
     async fn heart_beat(
         &self,
         request: Request<HeartBeatRequest>,
@@ -192,6 +148,11 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         let mut inner = self.inner.lock().unwrap();
 
         // TODO: track max request_id and if < max then return error.
+        let max_request_id = inner.max_request_id.entry(address.clone()).or_default();
+        if request_id < *max_request_id {
+            return Err(Status::cancelled("Old request id."));
+        }
+        *max_request_id = request_id;
 
         let current_lifetime_id = current_runtime_info.lifetime_id;
 
