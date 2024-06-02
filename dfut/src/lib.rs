@@ -3,13 +3,6 @@ pub enum Error {
     System,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct WorkerServerConfig {
-    pub local_server_address: String,
-    pub global_scheduler_address: String,
-    pub fn_names: Vec<String>,
-}
-
 mod client_pool;
 mod consts;
 mod d_fut;
@@ -36,7 +29,7 @@ pub use d_scheduler::Where;
 pub use global_scheduler::GlobalScheduler;
 pub use runtime::{
     client::{RootRuntimeClient, RuntimeClient},
-    runtime::{RootRuntime, Runtime},
+    runtime::{RootRuntime, Runtime, WorkerServerConfig, WorkerServiceExt},
 };
 pub use services::worker_service::{
     worker_service_client::WorkerServiceClient,

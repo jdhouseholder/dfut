@@ -286,39 +286,11 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            fn process_fn_names_allowlist(fn_names: Vec<String>) -> Vec<String> {
-                let all_fn_names = vec![#(#fn_names.to_string()),*];
-                if fn_names.len() > 0 {
-                    for fn_name in &fn_names {
-                        if !all_fn_names.contains(fn_name) {
-                            panic!("Worker doesn't have d-fn: \"{fn_name}\".");
-                        }
-                    }
-                    fn_names
-                } else {
-                    all_fn_names
-                }
-            }
-
             pub async fn serve(worker_server_config: dfut::WorkerServerConfig) {
-                let dfut::WorkerServerConfig {
-                    local_server_address,
-                    global_scheduler_address,
-                    fn_names
-                } = worker_server_config;
-
-                let root_runtime = dfut::RootRuntime::new(
-                    &local_server_address,
-                    &global_scheduler_address,
-                    Self::process_fn_names_allowlist(fn_names),
-                )
-                .await;
-
-                let server = #server_ident::new(root_runtime.clone());
-
-                root_runtime.serve(
-                    &local_server_address,
-                    dfut::WorkerServiceServer::new(server)
+                let available_fn_names = vec![#(#fn_names.to_string()),*];
+                dfut::RootRuntime::serve::<#server_ident>(
+                    worker_server_config,
+                    available_fn_names,
                 ).await;
             }
 
@@ -359,14 +331,6 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
             root_runtime: dfut::RootRuntime,
         }
 
-        impl #server_ident {
-            fn new(root_runtime: dfut::RootRuntime) -> Self {
-                Self {
-                    root_runtime,
-                }
-            }
-        }
-
         #[dfut::tonic::async_trait]
         impl dfut::WorkerService for #server_ident {
             async fn do_work(
@@ -381,6 +345,14 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 Ok(dfut::tonic::Response::new(resp))
+            }
+        }
+
+        impl dfut::WorkerServiceExt for #server_ident {
+            fn new(root_runtime: dfut::RootRuntime) -> Self {
+                Self {
+                    root_runtime,
+                }
             }
         }
     };

@@ -32,7 +32,7 @@ use crate::{
             RegisterResponse, RequestId, RuntimeInfo,
         },
         worker_service::{
-            worker_service_server::WorkerService, worker_service_server::WorkerServiceServer,
+            worker_service_server::{WorkerService, WorkerServiceServer},
             DoWorkResponse,
         },
     },
@@ -41,6 +41,17 @@ use crate::{
     work::{IntoWork, Work},
     DResult, Error,
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkerServerConfig {
+    pub local_server_address: String,
+    pub global_scheduler_address: String,
+    pub fn_names: Vec<String>,
+}
+
+pub trait WorkerServiceExt: WorkerService {
+    fn new(root_runtime: RootRuntime) -> Self;
+}
 
 #[derive(Debug)]
 struct SharedRuntimeState {
@@ -69,13 +80,32 @@ pub struct RootRuntime {
 }
 
 impl RootRuntime {
-    pub async fn new(
-        local_server_address: &str,
-        global_scheduler_address: &str,
-        fn_names: Vec<String>,
-    ) -> Self {
+    fn filter_fn_names(available_fn_names: Vec<String>, fn_names: Vec<String>) -> Vec<String> {
+        if fn_names.len() > 0 {
+            for fn_name in &fn_names {
+                if !available_fn_names.contains(fn_name) {
+                    panic!("Worker doesn't have d-fn: \"{fn_name}\".");
+                }
+            }
+            fn_names
+        } else {
+            available_fn_names
+        }
+    }
+
+    pub async fn serve<T>(cfg: WorkerServerConfig, available_fn_names: Vec<String>)
+    where
+        T: WorkerServiceExt,
+    {
+        let WorkerServerConfig {
+            local_server_address,
+            global_scheduler_address,
+            fn_names,
+        } = cfg;
+
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let mut global_scheduler = Self::gs_connect(endpoint).await;
+        let fn_names = Self::filter_fn_names(available_fn_names, fn_names);
 
         let RegisterResponse {
             lifetime_id,
@@ -96,10 +126,10 @@ impl RootRuntime {
         let address_to_gaps = AddressToGaps::default();
 
         let d_store = Arc::new(
-            DStore::new(local_server_address, &lifetime_id, address_to_gaps.clone()).await,
+            DStore::new(&local_server_address, &lifetime_id, address_to_gaps.clone()).await,
         );
 
-        Self {
+        let root_runtime = Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 local_server_address: local_server_address.to_string(),
                 // TODO: pass in through config
@@ -108,7 +138,7 @@ impl RootRuntime {
                 global_scheduler,
                 d_scheduler: DScheduler::default(),
                 peer_worker_client: PeerWorkerClient::new(),
-                d_store,
+                d_store: Arc::clone(&d_store),
 
                 address_to_gaps,
                 address_to_runtime_info: Mutex::default(),
@@ -121,6 +151,38 @@ impl RootRuntime {
             }),
 
             heart_beat_timeout,
+        };
+
+        let heart_beat_fut = tokio::spawn({
+            let root_runtime = root_runtime.clone();
+            async move {
+                root_runtime.heart_beat_forever().await;
+            }
+        });
+
+        let serve_fut = Server::builder()
+            .add_service(
+                DStoreServiceServer::new(d_store)
+                    .max_encoding_message_size(usize::MAX)
+                    .max_decoding_message_size(usize::MAX),
+            )
+            .add_service(
+                WorkerServiceServer::new(T::new(root_runtime))
+                    .max_encoding_message_size(usize::MAX)
+                    .max_decoding_message_size(usize::MAX),
+            )
+            .serve(
+                local_server_address
+                    .strip_prefix("http://")
+                    .unwrap()
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+
+        tokio::select! {
+            r = serve_fut => r.unwrap(),
+            _ = heart_beat_fut => {},
         }
     }
 
@@ -342,42 +404,6 @@ impl RootRuntime {
             // TODO: insert tombstone for tasks that are running on this worker
 
             sleep_with_jitter(sleep_for).await;
-        }
-    }
-
-    pub async fn serve<T>(self, address: &str, worker_service_server: WorkerServiceServer<T>)
-    where
-        T: WorkerService,
-    {
-        let address = address
-            .strip_prefix("http://")
-            .unwrap()
-            .to_string()
-            .parse()
-            .unwrap();
-
-        let d_store = Arc::clone(&self.shared_runtime_state.d_store);
-
-        let heart_beat_fut = tokio::spawn(async move {
-            self.heart_beat_forever().await;
-        });
-
-        let serve_fut = Server::builder()
-            .add_service(
-                DStoreServiceServer::new(d_store)
-                    .max_encoding_message_size(usize::MAX)
-                    .max_decoding_message_size(usize::MAX),
-            )
-            .add_service(
-                worker_service_server
-                    .max_encoding_message_size(usize::MAX)
-                    .max_decoding_message_size(usize::MAX),
-            )
-            .serve(address);
-
-        tokio::select! {
-            r = serve_fut => r.unwrap(),
-            _ = heart_beat_fut => {},
         }
     }
 }
