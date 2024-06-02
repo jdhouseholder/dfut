@@ -10,13 +10,12 @@ use lru::LruCache;
 use metrics::counter;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tonic::{
-    transport::{Channel, Endpoint},
-    Request, Response, Status,
-};
+use tonic::{transport::Channel, Request, Response, Status};
 
 use crate::{
+    client_pool::ClientPool,
     gaps::AddressToGaps,
+    retry::rpc_with_retry,
     rpc_context::RpcContext,
     services::d_store_service::{
         d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
@@ -481,16 +480,14 @@ impl DStore {
 #[derive(Debug, Clone)]
 pub struct DStoreClient {
     lru: Arc<Mutex<LruCache<DStoreId, Arc<dyn Any + Send + Sync + 'static>>>>,
-    d_store_service_client_cache: Arc<Mutex<LruCache<String, DStoreServiceClient<Channel>>>>,
+    pool: ClientPool<DStoreServiceClient<Channel>>,
 }
 
 impl Default for DStoreClient {
     fn default() -> Self {
         Self {
             lru: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap()))),
-            d_store_service_client_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(100).unwrap(),
-            ))),
+            pool: ClientPool::new(),
         }
     }
 }
@@ -498,32 +495,6 @@ impl Default for DStoreClient {
 impl DStoreClient {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    async fn get_or_connect(&self, address: &str) -> DStoreServiceClient<Channel> {
-        let maybe_client = self
-            .d_store_service_client_cache
-            .lock()
-            .unwrap()
-            .get(address)
-            .map(|client| client.clone());
-
-        match maybe_client {
-            Some(client) => client,
-            None => {
-                let endpoint: Endpoint = address.parse().unwrap();
-                let client = DStoreServiceClient::connect(endpoint)
-                    .await
-                    .unwrap()
-                    .max_encoding_message_size(usize::MAX)
-                    .max_decoding_message_size(usize::MAX);
-                self.d_store_service_client_cache
-                    .lock()
-                    .unwrap()
-                    .put(address.to_string(), client.clone());
-                client
-            }
-        }
     }
 
     pub(crate) async fn get_or_watch<T>(
@@ -549,25 +520,26 @@ impl DStoreClient {
             return Ok((*v).clone());
         }
 
-        let mut client = self.get_or_connect(&key.address).await;
         let request_id = rpc_context.next_request_id(&key.address);
-        let GetOrWatchResponse { object } = client
-            .get_or_watch(GetOrWatchRequest {
-                remote_address: rpc_context.local_address.clone(),
-                remote_lifetime_id: rpc_context.lifetime_id,
-                request_id,
+        let GetOrWatchResponse { object } =
+            rpc_with_retry(&self.pool, &key.address, |mut client| {
+                let key = key.clone();
+                async move {
+                    client
+                        .get_or_watch(GetOrWatchRequest {
+                            remote_address: rpc_context.local_address.clone(),
+                            remote_lifetime_id: rpc_context.lifetime_id,
+                            request_id,
 
-                address: key.address.clone(),
-                lifetime_id: key.lifetime_id,
-                task_id: key.task_id,
-                object_id: key.object_id,
+                            address: key.address,
+                            lifetime_id: key.lifetime_id,
+                            task_id: key.task_id,
+                            object_id: key.object_id,
+                        })
+                        .await
+                }
             })
-            .await
-            .map_err(|e| {
-                tracing::error!("{e:?}");
-                Error::System
-            })?
-            .into_inner();
+            .await?;
 
         let t: T = bincode::deserialize(&object).unwrap();
 
@@ -583,22 +555,26 @@ impl DStoreClient {
         key: &DStoreId,
         n: u64,
     ) -> Result<(), Error> {
-        let mut client = self.get_or_connect(&key.address).await;
         let request_id = rpc_context.next_request_id(&key.address);
-        let _ = client
-            .share_n(ShareNRequest {
-                remote_address: rpc_context.local_address.clone(),
-                remote_lifetime_id: rpc_context.lifetime_id,
-                request_id,
+        rpc_with_retry(&self.pool, &key.address, |mut client| {
+            let key = key.clone();
+            async move {
+                client
+                    .share_n(ShareNRequest {
+                        remote_address: rpc_context.local_address.clone(),
+                        remote_lifetime_id: rpc_context.lifetime_id,
+                        request_id,
 
-                address: key.address.clone(),
-                lifetime_id: key.lifetime_id,
-                task_id: key.task_id,
-                object_id: key.object_id,
-                n,
-            })
-            .await
-            .unwrap();
+                        address: key.address,
+                        lifetime_id: key.lifetime_id,
+                        task_id: key.task_id,
+                        object_id: key.object_id,
+                        n,
+                    })
+                    .await
+            }
+        })
+        .await?;
         return Ok(());
     }
 
@@ -608,28 +584,26 @@ impl DStoreClient {
         key: DStoreId,
         by: u64,
     ) -> Result<(), Error> {
-        let mut client = self.get_or_connect(&key.address).await;
         let request_id = rpc_context.next_request_id(&key.address);
-        let DStoreId {
-            address,
-            lifetime_id,
-            task_id,
-            object_id,
-        } = key;
-        let _ = client
-            .decrement_or_remove(DecrementOrRemoveRequest {
-                remote_address: rpc_context.local_address.clone(),
-                remote_lifetime_id: rpc_context.lifetime_id,
-                request_id,
+        rpc_with_retry(&self.pool, &key.address, |mut client| {
+            let key = key.clone();
+            async move {
+                client
+                    .decrement_or_remove(DecrementOrRemoveRequest {
+                        remote_address: rpc_context.local_address.clone(),
+                        remote_lifetime_id: rpc_context.lifetime_id,
+                        request_id,
 
-                address,
-                lifetime_id,
-                task_id,
-                object_id,
-                by,
-            })
-            .await
-            .unwrap();
+                        address: key.address,
+                        lifetime_id: key.lifetime_id,
+                        task_id: key.task_id,
+                        object_id: key.object_id,
+                        by,
+                    })
+                    .await
+            }
+        })
+        .await?;
         return Ok(());
     }
 }

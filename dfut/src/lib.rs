@@ -10,6 +10,7 @@ pub struct WorkerServerConfig {
     pub fn_names: Vec<String>,
 }
 
+mod client_pool;
 mod d_fut;
 mod d_scheduler;
 mod d_store;
@@ -17,6 +18,7 @@ mod fn_index;
 mod gaps;
 mod global_scheduler;
 mod peer_work;
+mod retry;
 mod rpc_context;
 mod runtime;
 mod seq;
