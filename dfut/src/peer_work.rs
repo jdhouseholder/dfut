@@ -3,7 +3,7 @@ use tonic::transport::Channel;
 use crate::{
     client_pool::ClientPool,
     d_store::DStoreId,
-    retry::rpc_with_retry,
+    retry::retry_from_pool,
     services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest},
     work::Work,
     DResult,
@@ -30,7 +30,7 @@ impl PeerWorkerClient {
         address: &str,
         w: Work,
     ) -> DResult<DStoreId> {
-        rpc_with_retry(&self.pool, address, |mut client| {
+        retry_from_pool(&self.pool, address, |mut client| {
             let w = w.clone();
             async move {
                 client

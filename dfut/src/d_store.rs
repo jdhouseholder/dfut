@@ -15,7 +15,7 @@ use tonic::{transport::Channel, Request, Response, Status};
 use crate::{
     client_pool::ClientPool,
     gaps::AddressToGaps,
-    retry::rpc_with_retry,
+    retry::retry_from_pool,
     rpc_context::RpcContext,
     services::d_store_service::{
         d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
@@ -522,7 +522,7 @@ impl DStoreClient {
 
         let request_id = rpc_context.next_request_id(&key.address);
         let GetOrWatchResponse { object } =
-            rpc_with_retry(&self.pool, &key.address, |mut client| {
+            retry_from_pool(&self.pool, &key.address, |mut client| {
                 let key = key.clone();
                 async move {
                     client
@@ -556,7 +556,7 @@ impl DStoreClient {
         n: u64,
     ) -> Result<(), Error> {
         let request_id = rpc_context.next_request_id(&key.address);
-        rpc_with_retry(&self.pool, &key.address, |mut client| {
+        retry_from_pool(&self.pool, &key.address, |mut client| {
             let key = key.clone();
             async move {
                 client
@@ -585,7 +585,7 @@ impl DStoreClient {
         by: u64,
     ) -> Result<(), Error> {
         let request_id = rpc_context.next_request_id(&key.address);
-        rpc_with_retry(&self.pool, &key.address, |mut client| {
+        retry_from_pool(&self.pool, &key.address, |mut client| {
             let key = key.clone();
             async move {
                 client

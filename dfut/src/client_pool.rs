@@ -6,6 +6,7 @@ use tonic::transport::{Channel, Endpoint, Error};
 
 use crate::services::{
     d_store_service::d_store_service_client::DStoreServiceClient,
+    global_scheduler_service::global_scheduler_service_client::GlobalSchedulerServiceClient,
     worker_service::worker_service_client::WorkerServiceClient,
 };
 
@@ -30,6 +31,17 @@ impl Connect for DStoreServiceClient<Channel> {
     fn connect(endpoint: Endpoint) -> impl std::future::Future<Output = Result<Self, Error>> {
         async move {
             let client = DStoreServiceClient::connect(endpoint).await?;
+            Ok(client
+                .max_encoding_message_size(usize::MAX)
+                .max_decoding_message_size(usize::MAX))
+        }
+    }
+}
+
+impl Connect for GlobalSchedulerServiceClient<Channel> {
+    fn connect(endpoint: Endpoint) -> impl std::future::Future<Output = Result<Self, Error>> {
+        async move {
+            let client = GlobalSchedulerServiceClient::connect(endpoint).await?;
             Ok(client
                 .max_encoding_message_size(usize::MAX)
                 .max_decoding_message_size(usize::MAX))

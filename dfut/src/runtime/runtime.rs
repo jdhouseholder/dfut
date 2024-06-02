@@ -22,6 +22,7 @@ use crate::{
     fn_index::FnIndex,
     gaps::AddressToGaps,
     peer_work::PeerWorkerClient,
+    retry::retry,
     rpc_context::RpcContext,
     seq::Seq,
     services::{
@@ -58,7 +59,6 @@ struct SharedRuntimeState {
     local_server_address: String,
     dfut_retries: usize,
 
-    global_scheduler: GlobalSchedulerServiceClient<Channel>,
     d_scheduler: DScheduler,
     peer_worker_client: PeerWorkerClient,
     d_store: Arc<DStore>,
@@ -104,24 +104,24 @@ impl RootRuntime {
         } = cfg;
 
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-        let mut global_scheduler = Self::gs_connect(endpoint).await;
+
         let fn_names = Self::filter_fn_names(available_fn_names, fn_names);
+
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
 
         let RegisterResponse {
             lifetime_id,
             heart_beat_timeout,
             ..
-        } = global_scheduler
-            .register(RegisterRequest {
-                address: local_server_address.to_string(),
-                fn_names,
-            })
-            .await
-            .unwrap()
-            .into_inner();
+        } = retry(&mut client, &endpoint, |mut client| {
+            let address = local_server_address.to_string();
+            let fn_names = fn_names.clone();
+            async move { client.register(RegisterRequest { address, fn_names }).await }
+        })
+        .await
+        .expect("Unable to register.");
 
         let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
-        let next_task_id = AtomicU64::new(0);
 
         let address_to_gaps = AddressToGaps::default();
 
@@ -135,7 +135,6 @@ impl RootRuntime {
                 // TODO: pass in through config
                 dfut_retries: DFUT_RETRIES,
 
-                global_scheduler,
                 d_scheduler: DScheduler::default(),
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store: Arc::clone(&d_store),
@@ -143,7 +142,7 @@ impl RootRuntime {
                 address_to_gaps,
                 address_to_runtime_info: Mutex::default(),
                 lifetime_id,
-                next_task_id,
+                next_task_id: AtomicU64::new(0),
                 next_request_id: Arc::default(),
 
                 fn_name_to_addresses: Mutex::new(FnIndex::default()),
@@ -156,7 +155,7 @@ impl RootRuntime {
         let heart_beat_fut = tokio::spawn({
             let root_runtime = root_runtime.clone();
             async move {
-                root_runtime.heart_beat_forever().await;
+                root_runtime.heart_beat_forever(endpoint, client).await;
             }
         });
 
@@ -184,16 +183,6 @@ impl RootRuntime {
             r = serve_fut => r.unwrap(),
             _ = heart_beat_fut => {},
         }
-    }
-
-    async fn gs_connect(endpoint: Endpoint) -> GlobalSchedulerServiceClient<Channel> {
-        for i in 0..5 {
-            if let Ok(client) = GlobalSchedulerServiceClient::connect(endpoint.clone()).await {
-                return client;
-            }
-            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(i))).await;
-        }
-        panic!();
     }
 
     fn new_child(
@@ -286,7 +275,11 @@ impl RootRuntime {
         Ok(d_store_id.into())
     }
 
-    async fn heart_beat_forever(&self) {
+    async fn heart_beat_forever(
+        &self,
+        endpoint: Endpoint,
+        mut global_scheduler: Option<GlobalSchedulerServiceClient<Channel>>,
+    ) {
         // TODO: shutdown via select.
         let sleep_for = self.heart_beat_timeout / 3;
         let mut request_id = 0u64;
@@ -301,27 +294,31 @@ impl RootRuntime {
                     .clone()
             };
 
-            // TODO: retry & graceful fail.
             let HeartBeatResponse {
                 lifetime_id,
                 address_to_runtime_info,
                 ..
-            } = self
-                .shared_runtime_state
-                .global_scheduler
-                .clone()
-                .heart_beat(HeartBeatRequest {
-                    request_id,
-                    address: self.shared_runtime_state.local_server_address.to_string(),
-                    current_runtime_info: Some(CurrentRuntimeInfo {
-                        lifetime_id: local_lifetime_id,
-                        stats: None,
-                        failed_local_tasks,
-                    }),
-                })
-                .await
-                .unwrap()
-                .into_inner();
+            } = retry(&mut global_scheduler, &endpoint, |mut client| {
+                let address = self.shared_runtime_state.local_server_address.to_string();
+                let failed_local_tasks = failed_local_tasks.clone();
+                async move {
+                    client
+                        .heart_beat(HeartBeatRequest {
+                            request_id,
+                            address,
+                            current_runtime_info: Some(CurrentRuntimeInfo {
+                                lifetime_id: local_lifetime_id,
+                                stats: None,
+                                failed_local_tasks,
+                            }),
+                        })
+                        .await
+                }
+            })
+            .await
+            .unwrap();
+            // TODO: turn off the worker here so that we can full restart.
+
             request_id += 1;
 
             let fn_index = FnIndex::compute(

@@ -53,6 +53,7 @@ impl GlobalScheduler {
             lifetime_timeout,
             ..Default::default()
         });
+
         let address = address
             .strip_prefix("http://")
             .unwrap()
