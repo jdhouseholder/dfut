@@ -35,9 +35,9 @@ impl GlobalScheduler {
     async fn expire_lifetimes(self: &Arc<Self>) {
         // Proposal that expires lifetime ids based on timeout.
         // On commit: remove addresses that have expired from fn_availability.
-        let now = Instant::now();
-
         let mut inner = self.inner.lock().unwrap();
+
+        let now = Instant::now();
         for lifetime_lease in inner.lifetimes.values_mut() {
             let dur_since_last_heart_beat = now.checked_duration_since(lifetime_lease.at).unwrap();
             let lifetime_id_timeout = dur_since_last_heart_beat > self.lifetime_timeout;
