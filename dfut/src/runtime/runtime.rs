@@ -457,31 +457,30 @@ impl Runtime {
             return Err(Error::System);
         }
 
-        let parent_info = self.parent_info.last().unwrap();
-
-        if let Some(parent_runtime_info) = self
+        let address_to_runtime_info = self
             .shared_runtime_state
             .address_to_runtime_info
             .lock()
-            .unwrap()
-            .get(&parent_info.address)
-        {
-            if parent_runtime_info.lifetime_id < parent_info.lifetime_id {
-                return Err(Error::System);
-            }
-
-            if parent_runtime_info.lifetime_id == parent_info.lifetime_id {
-                let mut failure = false;
-                for task_failure in &parent_runtime_info.task_failures {
-                    if task_failure.lifetime_id == parent_info.lifetime_id
-                        && task_failure.task_id == parent_info.task_id
-                    {
-                        failure = true;
-                        break;
-                    }
-                }
-                if failure {
+            .unwrap();
+        for parent_info in self.parent_info.iter() {
+            if let Some(parent_runtime_info) = address_to_runtime_info.get(&parent_info.address) {
+                if parent_runtime_info.lifetime_id < parent_info.lifetime_id {
                     return Err(Error::System);
+                }
+
+                if parent_runtime_info.lifetime_id == parent_info.lifetime_id {
+                    let mut failure = false;
+                    for task_failure in &parent_runtime_info.task_failures {
+                        if task_failure.lifetime_id == parent_info.lifetime_id
+                            && task_failure.task_id == parent_info.task_id
+                        {
+                            failure = true;
+                            break;
+                        }
+                    }
+                    if failure {
+                        return Err(Error::System);
+                    }
                 }
             }
         }

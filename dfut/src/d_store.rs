@@ -326,10 +326,11 @@ impl LocalStore {
     ) -> Option<DStoreId> {
         let m = self.m.lock().unwrap();
         for (k, v) in m.iter() {
-            if v.parent_info.last().unwrap().address == parent_address
-                && v.parent_info.last().unwrap().lifetime_id == parent_lifetime_id
-                && v.parent_info.last().unwrap().task_id == parent_task_id
-                && v.parent_info.last().unwrap().request_id == request_id
+            let parent_info = v.parent_info.last().unwrap();
+            if parent_info.address == parent_address
+                && parent_info.lifetime_id == parent_lifetime_id
+                && parent_info.task_id == parent_task_id
+                && parent_info.request_id == request_id
             {
                 return Some(k.clone());
             }
