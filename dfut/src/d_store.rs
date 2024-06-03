@@ -17,12 +17,14 @@ use crate::{
     gaps::AddressToGaps,
     retry::retry_from_pool,
     rpc_context::RpcContext,
-    services::d_store_service::{
-        d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
-        DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest, GetOrWatchResponse,
-        ShareNRequest, ShareNResponse,
+    services::{
+        d_store_service::{
+            d_store_service_client::DStoreServiceClient, d_store_service_server::DStoreService,
+            DecrementOrRemoveRequest, DecrementOrRemoveResponse, GetOrWatchRequest,
+            GetOrWatchResponse, ShareNRequest, ShareNResponse,
+        },
+        worker_service::{DoWorkResponse, ParentInfo},
     },
-    services::worker_service::DoWorkResponse,
     Error,
 };
 
@@ -76,17 +78,9 @@ impl From<DoWorkResponse> for DStoreId {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ParentInfo {
-    pub(crate) address: String,
-    pub(crate) lifetime_id: u64,
-    pub(crate) task_id: u64,
-    pub(crate) request_id: u64,
-}
-
 #[derive(Debug)]
 struct Value {
-    parent_info: Arc<ParentInfo>,
+    parent_info: Arc<Vec<ParentInfo>>,
     ref_count: u64,
     value_state: ValueState,
 }
@@ -110,7 +104,7 @@ struct LocalStore {
 // is the local store simple iff we require an extra call to decrement ref?
 // Or do we have to guarantee one req in flight per peer?
 impl LocalStore {
-    fn reserve(&self, parent_info: Arc<ParentInfo>, key: DStoreId) {
+    fn reserve(&self, parent_info: Arc<Vec<ParentInfo>>, key: DStoreId) {
         let (tx, _) = broadcast::channel(1);
         let mut m = self.m.lock().unwrap();
         m.insert(
@@ -256,10 +250,10 @@ impl LocalStore {
 
         let mut remove = Vec::new();
         for (id, entry) in m.iter() {
-            if entry.parent_info.address == address
-                && entry.parent_info.lifetime_id < new_lifetime_id
-            {
-                remove.push(id.clone());
+            for parent_info in entry.parent_info.iter() {
+                if parent_info.address == address && parent_info.lifetime_id < new_lifetime_id {
+                    remove.push(id.clone());
+                }
             }
         }
 
@@ -277,11 +271,13 @@ impl LocalStore {
 
         let mut remove = Vec::new();
         for (id, entry) in m.iter() {
-            if entry.parent_info.address == address
-                && entry.parent_info.lifetime_id == new_lifetime_id
-                && entry.parent_info.task_id == task_id
-            {
-                remove.push(id.clone());
+            for parent_info in entry.parent_info.iter() {
+                if parent_info.address == address
+                    && parent_info.lifetime_id == new_lifetime_id
+                    && parent_info.task_id == task_id
+                {
+                    remove.push(id.clone());
+                }
             }
         }
 
@@ -330,10 +326,10 @@ impl LocalStore {
     ) -> Option<DStoreId> {
         let m = self.m.lock().unwrap();
         for (k, v) in m.iter() {
-            if v.parent_info.address == parent_address
-                && v.parent_info.lifetime_id == parent_lifetime_id
-                && v.parent_info.task_id == parent_task_id
-                && v.parent_info.request_id == request_id
+            if v.parent_info.last().unwrap().address == parent_address
+                && v.parent_info.last().unwrap().lifetime_id == parent_lifetime_id
+                && v.parent_info.last().unwrap().task_id == parent_task_id
+                && v.parent_info.last().unwrap().request_id == request_id
             {
                 return Some(k.clone());
             }
@@ -371,7 +367,7 @@ impl DStore {
         }
     }
 
-    pub(crate) fn take_next_id(&self, parent_info: Arc<ParentInfo>, task_id: u64) -> DStoreId {
+    pub(crate) fn take_next_id(&self, parent_info: Arc<Vec<ParentInfo>>, task_id: u64) -> DStoreId {
         let key = DStoreId {
             address: self.current_address.clone(),
             lifetime_id: self.lifetime_id.load(Ordering::SeqCst),
@@ -756,12 +752,12 @@ mod local_store_test {
         let want = vec![1];
 
         local_store.reserve(
-            Arc::new(ParentInfo {
+            Arc::new(vec![ParentInfo {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
                 request_id: 0,
-            }),
+            }]),
             key.clone(),
         );
         local_store.insert(key.clone(), want.clone()).unwrap();
@@ -804,12 +800,12 @@ mod local_store_test {
         });
 
         local_store.reserve(
-            Arc::new(ParentInfo {
+            Arc::new(vec![ParentInfo {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
                 request_id: 0,
-            }),
+            }]),
             key.clone(),
         );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

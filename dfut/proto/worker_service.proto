@@ -1,15 +1,18 @@
 syntax = "proto3";
 package worker_service;
 
-message DoWorkRequest {
-	string parent_address = 1;
-	fixed64 parent_lifetime_id = 2;
-	fixed64 parent_task_id = 3;
-
+message ParentInfo {
+	string address = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 task_id = 3;
 	fixed64 request_id = 4;
+}
 
-	string fn_name = 5;
-	bytes args = 6;
+message DoWorkRequest {
+	repeated ParentInfo parent_info = 1;
+
+	string fn_name = 2;
+	bytes args = 3;
 }
 
 message DoWorkResponse {

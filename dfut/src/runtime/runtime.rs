@@ -18,7 +18,7 @@ use crate::{
     consts::DFUT_RETRIES,
     d_fut::DFut,
     d_scheduler::{DScheduler, Where},
-    d_store::{DStore, DStoreId, ParentInfo, ValueTrait},
+    d_store::{DStore, DStoreId, ValueTrait},
     fn_index::FnIndex,
     gaps::AddressToGaps,
     peer_work::PeerWorkerClient,
@@ -34,7 +34,7 @@ use crate::{
         },
         worker_service::{
             worker_service_server::{WorkerService, WorkerServiceServer},
-            DoWorkResponse,
+            DoWorkResponse, ParentInfo,
         },
     },
     sleep::sleep_with_jitter,
@@ -185,23 +185,12 @@ impl RootRuntime {
         }
     }
 
-    fn new_child(
-        &self,
-        parent_address: &str,
-        parent_lifetime_id: u64,
-        parent_task_id: u64,
-        parent_request_id: u64,
-    ) -> Runtime {
+    fn new_child(&self, parent_info: Vec<ParentInfo>) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
             lifetime_id: self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst),
-            parent_info: Arc::new(ParentInfo {
-                address: parent_address.to_string(),
-                lifetime_id: parent_lifetime_id,
-                task_id: parent_task_id,
-                request_id: parent_request_id,
-            }),
+            parent_info: Arc::new(parent_info),
             task_id: self
                 .shared_runtime_state
                 .next_task_id
@@ -232,10 +221,7 @@ impl RootRuntime {
 
     pub fn do_local_work<F, T, FutFn>(
         &self,
-        parent_address: &str,
-        parent_lifetime_id: u64,
-        parent_task_id: u64,
-        request_id: u64,
+        parent_info: Vec<ParentInfo>,
         fn_name: &str,
         f: FutFn,
     ) -> Result<DoWorkResponse, Status>
@@ -244,6 +230,13 @@ impl RootRuntime {
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
+        let parent_task = parent_info.last().unwrap();
+
+        let parent_address = &parent_task.address;
+        let parent_lifetime_id = parent_task.lifetime_id;
+        let parent_task_id = parent_task.task_id;
+        let request_id = parent_task.request_id;
+
         self.validate_lifetime_id(parent_address, parent_lifetime_id)?;
 
         if self
@@ -264,12 +257,7 @@ impl RootRuntime {
                 .ok_or(Status::not_found("Result has already been deallocated"));
         }
 
-        let runtime = self.new_child(
-            parent_address,
-            parent_lifetime_id,
-            parent_task_id,
-            request_id,
-        );
+        let runtime = self.new_child(parent_info);
         let fut = f(runtime.clone());
         let d_store_id = runtime.do_local_work(fn_name, fut);
         Ok(d_store_id.into())
@@ -428,7 +416,9 @@ pub struct Runtime {
     shared_runtime_state: Arc<SharedRuntimeState>,
 
     lifetime_id: u64,
-    parent_info: Arc<ParentInfo>,
+
+    parent_info: Arc<Vec<ParentInfo>>,
+
     task_id: u64,
     inner: Arc<Mutex<InnerRuntime>>,
     requests: Arc<Mutex<Vec<RequestId>>>,
@@ -467,22 +457,24 @@ impl Runtime {
             return Err(Error::System);
         }
 
+        let parent_info = self.parent_info.last().unwrap();
+
         if let Some(parent_runtime_info) = self
             .shared_runtime_state
             .address_to_runtime_info
             .lock()
             .unwrap()
-            .get(&self.parent_info.address)
+            .get(&parent_info.address)
         {
-            if parent_runtime_info.lifetime_id < self.parent_info.lifetime_id {
+            if parent_runtime_info.lifetime_id < parent_info.lifetime_id {
                 return Err(Error::System);
             }
 
-            if parent_runtime_info.lifetime_id == self.parent_info.lifetime_id {
+            if parent_runtime_info.lifetime_id == parent_info.lifetime_id {
                 let mut failure = false;
                 for task_failure in &parent_runtime_info.task_failures {
-                    if task_failure.lifetime_id == self.parent_info.lifetime_id
-                        && task_failure.task_id == self.parent_info.task_id
+                    if task_failure.lifetime_id == parent_info.lifetime_id
+                        && task_failure.task_id == parent_info.task_id
                     {
                         failure = true;
                         break;
@@ -505,8 +497,8 @@ impl Runtime {
         }
     }
 
-    fn next_request_id(&self, address: &str) -> u64 {
-        let id = self
+    fn next_parent_info(&self, address: &str) -> Vec<ParentInfo> {
+        let request_id = self
             .shared_runtime_state
             .next_request_id
             .lock()
@@ -514,9 +506,19 @@ impl Runtime {
             .next(address);
         self.requests.lock().unwrap().push(RequestId {
             address: address.to_string(),
-            request_id: id,
+            request_id,
         });
-        id
+
+        let mut parent_info = (*self.parent_info).clone();
+
+        parent_info.push(ParentInfo {
+            address: self.shared_runtime_state.local_server_address.clone(),
+            lifetime_id: self.lifetime_id,
+            task_id: self.task_id,
+            request_id,
+        });
+
+        parent_info
     }
 
     async fn try_retry_dfut<T>(&self, d_store_id: &DStoreId) -> DResult<T>
@@ -563,19 +565,12 @@ impl Runtime {
                             .unwrap()
                     };
 
-                    let request_id = self.next_request_id(&address);
+                    let parent_info = self.next_parent_info(&address);
 
                     let d_store_id = self
                         .shared_runtime_state
                         .peer_worker_client
-                        .do_work(
-                            &self.shared_runtime_state.local_server_address,
-                            self.lifetime_id,
-                            self.task_id,
-                            request_id,
-                            &address,
-                            work.clone(),
-                        )
+                        .do_work(&parent_info, &address, work.clone())
                         .await?;
 
                     let t: DResult<T> = self
@@ -715,12 +710,12 @@ impl Runtime {
 }
 
 impl Runtime {
-    fn new_child(&self) -> Runtime {
+    fn new_child(&self, parent_info: &Arc<Vec<ParentInfo>>) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
             lifetime_id: self.lifetime_id,
-            parent_info: Arc::clone(&self.parent_info),
+            parent_info: Arc::clone(parent_info),
             task_id: self
                 .shared_runtime_state
                 .next_task_id
@@ -821,7 +816,7 @@ impl Runtime {
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
-        let r = self.new_child();
+        let r = self.new_child(&self.parent_info);
         let fut = f(r);
         let d_store_id = self.do_local_work(fn_name, fut);
         d_store_id.into()
@@ -862,19 +857,12 @@ impl Runtime {
                 .unwrap()
         };
 
-        let request_id = self.next_request_id(&address);
+        let parent_info = self.next_parent_info(&address);
 
         let d_store_id = self
             .shared_runtime_state
             .peer_worker_client
-            .do_work(
-                &self.shared_runtime_state.local_server_address,
-                self.lifetime_id,
-                self.task_id,
-                request_id,
-                &address,
-                work.clone(),
-            )
+            .do_work(&parent_info, &address, work.clone())
             .await?;
 
         self.track_call(d_store_id.clone(), Call::Remote { work });

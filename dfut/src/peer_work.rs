@@ -4,7 +4,9 @@ use crate::{
     client_pool::ClientPool,
     d_store::DStoreId,
     retry::retry_from_pool,
-    services::worker_service::{worker_service_client::WorkerServiceClient, DoWorkRequest},
+    services::worker_service::{
+        worker_service_client::WorkerServiceClient, DoWorkRequest, ParentInfo,
+    },
     work::Work,
     DResult,
 };
@@ -23,10 +25,7 @@ impl PeerWorkerClient {
 
     pub(crate) async fn do_work(
         &self,
-        current_address: &str,
-        current_lifetime_id: u64,
-        current_task_id: u64,
-        request_id: u64,
+        parent_info: &[ParentInfo],
         address: &str,
         w: Work,
     ) -> DResult<DStoreId> {
@@ -35,10 +34,7 @@ impl PeerWorkerClient {
             async move {
                 client
                     .do_work(DoWorkRequest {
-                        parent_address: current_address.to_string(),
-                        parent_lifetime_id: current_lifetime_id,
-                        parent_task_id: current_task_id,
-                        request_id,
+                        parent_info: parent_info.to_vec(),
                         fn_name: w.fn_name,
                         args: w.args,
                     })

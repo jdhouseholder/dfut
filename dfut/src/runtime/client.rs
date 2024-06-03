@@ -15,9 +15,12 @@ use crate::{
     retry::retry,
     rpc_context::RpcContext,
     seq::Seq,
-    services::global_scheduler_service::{
-        global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
-        HeartBeatRequest, HeartBeatResponse, RegisterRequest, RegisterResponse, RequestId,
+    services::{
+        global_scheduler_service::{
+            global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
+            HeartBeatRequest, HeartBeatResponse, RegisterRequest, RegisterResponse, RequestId,
+        },
+        worker_service::ParentInfo,
     },
     sleep::sleep_with_jitter,
     work::{IntoWork, Work},
@@ -222,10 +225,12 @@ impl RuntimeClient {
         let d_store_id = self
             .peer_worker_client
             .do_work(
-                &client_id,
-                lifetime_id,
-                self.task_id,
-                request_id,
+                &[ParentInfo {
+                    address: client_id.clone(),
+                    lifetime_id,
+                    task_id: self.task_id,
+                    request_id,
+                }],
                 &address,
                 w.clone(),
             )
@@ -292,10 +297,12 @@ impl RuntimeClient {
                     let d_store_id = self
                         .peer_worker_client
                         .do_work(
-                            &client_id,
-                            lifetime_id,
-                            task_id,
-                            request_id,
+                            &[ParentInfo {
+                                address: client_id.clone(),
+                                lifetime_id,
+                                task_id,
+                                request_id,
+                            }],
                             &address,
                             work.clone(),
                         )
