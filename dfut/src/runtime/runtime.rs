@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use metrics::{counter, histogram};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::broadcast::{channel, Receiver, Sender};
+use tokio::sync::{
+    broadcast::{channel, Receiver, Sender},
+    watch::{channel as watch_channel, Receiver as WatchRx, Sender as WatchTx},
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::{
     transport::{Channel, Endpoint, Server},
@@ -181,12 +184,22 @@ impl RootRuntime {
             }),
         };
 
+        let (heart_beat_timeout_tx, mut heart_beat_timeout_rx) = watch_channel(0);
+        heart_beat_timeout_rx.mark_unchanged();
+
         let heart_beat_fut = task_tracker.spawn({
             let root_runtime = root_runtime.clone();
             async move {
                 root_runtime
-                    .heart_beat_forever(global_scheduler_address)
+                    .heart_beat_forever(global_scheduler_address, heart_beat_timeout_tx)
                     .await;
+            }
+        });
+
+        let expire_fut = task_tracker.spawn({
+            let root_runtime = root_runtime.clone();
+            async move {
+                root_runtime.expire_forever(heart_beat_timeout_rx).await;
             }
         });
 
@@ -216,6 +229,7 @@ impl RootRuntime {
                 tokio::select! {
                     r = serve_fut => r.unwrap(),
                     _ = heart_beat_fut => {},
+                    _ = expire_fut => {},
                     _ = cancellation_token.cancelled() => {},
                 }
             }
@@ -315,7 +329,33 @@ impl RootRuntime {
         Ok(d_store_id.into())
     }
 
-    async fn heart_beat_forever(&self, global_scheduler_address: String) {
+    async fn expire_forever(&self, mut heart_beat_timeout_rx: WatchRx<u64>) {
+        heart_beat_timeout_rx.changed().await.unwrap();
+
+        let mut last_task_failures = Vec::new();
+        loop {
+            let heart_beat_timeout = *heart_beat_timeout_rx.borrow();
+            sleep_with_jitter(3 * heart_beat_timeout).await;
+
+            {
+                let mut task_failures = self.shared_runtime_state.task_failures.lock().unwrap();
+
+                *task_failures = task_failures
+                    .clone()
+                    .into_iter()
+                    .filter(|tf| !last_task_failures.contains(tf))
+                    .collect();
+
+                last_task_failures = task_failures.clone();
+            }
+        }
+    }
+
+    async fn heart_beat_forever(
+        &self,
+        global_scheduler_address: String,
+        heart_beat_timeout_tx: WatchTx<u64>,
+    ) {
         let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
 
@@ -360,6 +400,8 @@ impl RootRuntime {
             })
             .await
             .unwrap();
+
+            heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();
             request_id = next_expected_request_id;
 
             self.shared_runtime_state.fn_name_to_addresses.update(
