@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
 };
 
@@ -29,41 +29,49 @@ impl GapState {
 
 #[derive(Debug, Default)]
 pub struct Gaps {
-    next_id: u64,
-    gaps: HashSet<u64>,
+    max: Option<u64>,
+    gaps: BTreeSet<u64>,
 }
 
 impl Gaps {
     pub fn add(&mut self, id: u64) -> GapState {
-        match u64::cmp(&id, &self.next_id) {
-            Ordering::Equal => {
-                self.next_id += 1;
-                GapState::New
-            }
-            Ordering::Less => {
-                if self.gaps.contains(&id) {
-                    self.gaps.remove(&id);
-                    GapState::New
-                } else {
-                    GapState::Seen
+        match self.max {
+            Some(max) => match u64::cmp(&id, &max) {
+                Ordering::Equal => GapState::Seen,
+                Ordering::Less => {
+                    if self.gaps.remove(&id) {
+                        GapState::New
+                    } else {
+                        GapState::Seen
+                    }
                 }
-            }
-            Ordering::Greater => {
-                for i in self.next_id..id {
+                Ordering::Greater => {
+                    if let Some(max) = self.max {
+                        if id > max + 1 {
+                            for i in (max + 1)..id {
+                                self.gaps.insert(i);
+                            }
+                        }
+                    }
+                    self.max = Some(id);
+                    GapState::New
+                }
+            },
+            None => {
+                for i in 0..id {
                     self.gaps.insert(i);
                 }
-                self.next_id = id;
+                self.max = Some(id);
                 GapState::New
             }
         }
     }
 
     pub fn clear(&mut self) {
-        self.next_id = 0;
+        self.max = None;
         self.gaps.clear();
     }
 }
-
 #[derive(Debug, Default)]
 pub struct LifetimeScopedGaps {
     lifetime_id: u64,
@@ -124,7 +132,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn add_works() {
         let mut gaps = Gaps::default();
         for _ in 0..2 {
             assert_eq!(gaps.add(0), GapState::New);

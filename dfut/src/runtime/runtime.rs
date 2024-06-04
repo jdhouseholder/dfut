@@ -43,18 +43,6 @@ use crate::{
     DResult, Error,
 };
 
-fn populate_stats(fn_names: Vec<String>) -> Stats {
-    let fn_stats: HashMap<String, FnStats> = fn_names
-        .into_iter()
-        .map(|fn_name| (fn_name, FnStats::default()))
-        .collect();
-
-    Stats {
-        fn_stats,
-        ..Default::default()
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct WorkerServerConfig {
     pub local_server_address: String,
@@ -150,7 +138,13 @@ impl RootRuntime {
             fn_names,
         } = cfg;
 
-        let stats = populate_stats(Self::filter_fn_names(available_fn_names, fn_names));
+        let stats = Stats {
+            fn_stats: Self::filter_fn_names(available_fn_names, fn_names)
+                .into_iter()
+                .map(|fn_name| (fn_name, FnStats::default()))
+                .collect(),
+            ..Default::default()
+        };
 
         let lifetime_id = Arc::new(AtomicU64::new(0));
 
@@ -794,7 +788,7 @@ impl Runtime {
             .accept_local_work(fn_name, arg_size)
     }
 
-    fn track_failed_task(&self, d_store_id: DStoreId) {
+    fn track_task_failure(&self, d_store_id: DStoreId) {
         self.shared_runtime_state
             .d_store
             .local_task_failure(d_store_id);
@@ -803,6 +797,7 @@ impl Runtime {
         // will be handled by the lifetime failover logic.
         if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
             counter!("task_failures::push").increment(1);
+
             self.shared_runtime_state
                 .task_failures
                 .lock()
@@ -836,14 +831,14 @@ impl Runtime {
                 rt.start_stopwatch();
 
                 if rt.check_runtime_state().is_err() {
-                    rt.track_failed_task(d_store_id);
+                    rt.track_task_failure(d_store_id);
                     return;
                 }
 
                 let t = match fut.await {
                     Ok(t) => t,
                     Err(Error::System) => {
-                        rt.track_failed_task(d_store_id);
+                        rt.track_task_failure(d_store_id);
                         return;
                     }
                 };
@@ -855,7 +850,7 @@ impl Runtime {
                 histogram!("do_local_work::size", "fn_name" => fn_name.clone()).record(size as f64);
 
                 if rt.check_runtime_state().is_err() {
-                    rt.track_failed_task(d_store_id);
+                    rt.track_task_failure(d_store_id);
                     return;
                 }
 
@@ -864,7 +859,7 @@ impl Runtime {
                     .d_store
                     .publish(d_store_id.clone(), t)
                 {
-                    rt.track_failed_task(d_store_id);
+                    rt.track_task_failure(d_store_id);
                     return;
                 }
             }
