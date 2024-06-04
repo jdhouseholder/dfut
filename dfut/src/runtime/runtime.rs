@@ -286,6 +286,15 @@ impl RootRuntime {
         let parent_task_id = parent_task.task_id;
         let request_id = parent_task.request_id.unwrap();
 
+        // TODO: remove this counter.
+        counter!(
+           "do_local_work",
+           "from" => parent_address.to_string(),
+           "to" => self.shared_runtime_state.local_server_address.to_string(),
+           "depth" => parent_info.len().to_string(),
+        )
+        .increment(1);
+
         self.validate_lifetime_id(parent_address, parent_lifetime_id)?;
 
         if self
