@@ -136,8 +136,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         inner
             .address_to_runtime_info
-            .entry(address.clone())
-            .or_insert(current_runtime_info);
+            .insert(address.clone(), current_runtime_info);
 
         // TODO: new failed_tasks have a ttl of 2 * HBTO and can then be removed.
         // TODO: use low watermark from worker to avoid having to failed_tasks forever.
