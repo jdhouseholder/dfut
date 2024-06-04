@@ -8,8 +8,7 @@ use tracing::error;
 
 use crate::services::global_scheduler_service::{
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
-    FnStats, HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse,
-    RegisterRequest, RegisterResponse, RuntimeInfo, Stats, TaskFailure,
+    HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse, RuntimeInfo,
 };
 
 #[derive(Debug)]
@@ -30,6 +29,7 @@ struct InnerGlobalScheduler {
 pub struct GlobalScheduler {
     inner: Mutex<InnerGlobalScheduler>,
     lifetime_timeout: Duration,
+    heart_beat_timeout: u64,
 }
 
 pub struct GlobalSchedulerHandle {
@@ -65,6 +65,7 @@ impl GlobalScheduler {
     ) -> GlobalSchedulerHandle {
         let global_scheduler = Arc::new(Self {
             lifetime_timeout,
+            heart_beat_timeout: lifetime_timeout.as_millis() as u64,
             ..Default::default()
         });
 
@@ -108,55 +109,6 @@ impl GlobalScheduler {
 
 #[tonic::async_trait]
 impl GlobalSchedulerService for Arc<GlobalScheduler> {
-    async fn register(
-        &self,
-        request: Request<RegisterRequest>,
-    ) -> Result<Response<RegisterResponse>, Status> {
-        let RegisterRequest { address, fn_names } = request.into_inner();
-
-        let mut inner = self.inner.lock().unwrap();
-
-        // TODO: store address -> lifetime_id ~forever.
-        let lifetime_id = match inner.lifetimes.entry(address.clone()) {
-            Entry::Occupied(ref mut e) => {
-                let l = e.get_mut();
-                l.at = Instant::now();
-                l.id
-            }
-            Entry::Vacant(v) => {
-                v.insert(LifetimeLease {
-                    id: 0,
-                    at: Instant::now(),
-                });
-                0
-            }
-        };
-
-        let runtime_info = inner
-            .address_to_runtime_info
-            .entry(address.clone())
-            .or_insert_with(|| {
-                let fn_stats: HashMap<String, FnStats> = fn_names
-                    .into_iter()
-                    .map(|fn_name| (fn_name, FnStats::default()))
-                    .collect();
-                RuntimeInfo {
-                    stats: Some(Stats {
-                        fn_stats,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }
-            });
-
-        runtime_info.lifetime_id = lifetime_id;
-
-        Ok(Response::new(RegisterResponse {
-            lifetime_id,
-            heart_beat_timeout: self.lifetime_timeout.as_millis() as u64,
-        }))
-    }
-
     async fn heart_beat(
         &self,
         request: Request<HeartBeatRequest>,
@@ -178,31 +130,14 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             return Err(Status::cancelled("Old request id."));
         }
         *max_request_id = request_id;
+        let next_expected_request_id = *max_request_id + 1;
 
         let current_lifetime_id = current_runtime_info.lifetime_id;
 
-        // TODO: Just set, don't merge.
-        match inner.address_to_runtime_info.entry(address.clone()) {
-            Entry::Occupied(ref mut o) => {
-                // TODO: merge
-                let stored_runtime_info = o.get_mut();
-
-                if current_runtime_info.failed_local_tasks.len() > 0 {
-                    let new_task_failures: Vec<_> = current_runtime_info
-                        .failed_local_tasks
-                        .into_iter()
-                        .map(|failed_task| TaskFailure {
-                            lifetime_id: current_runtime_info.lifetime_id,
-                            task_id: failed_task.task_id,
-                            requests: failed_task.requests,
-                        })
-                        .collect();
-                    stored_runtime_info.task_failures.extend(new_task_failures);
-                    stored_runtime_info.task_failures.dedup();
-                }
-            }
-            Entry::Vacant(_) => return Err(Status::not_found("Address is not registered.")),
-        }
+        inner
+            .address_to_runtime_info
+            .entry(address.clone())
+            .or_insert(current_runtime_info);
 
         // TODO: new failed_tasks have a ttl of 2 * HBTO and can then be removed.
         // TODO: use low watermark from worker to avoid having to failed_tasks forever.
@@ -241,16 +176,19 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 lifetime_lease.at = now;
                 lifetime_lease.id
             }
-            Entry::Vacant(_) => {
-                return Err(Status::invalid_argument(format!(
-                    "{} does not have a lifetime lease",
-                    address
-                )));
+            Entry::Vacant(v) => {
+                v.insert(LifetimeLease {
+                    id: 0,
+                    at: Instant::now(),
+                });
+                0
             }
         };
 
         Ok(Response::new(HeartBeatResponse {
             lifetime_id,
+            next_expected_request_id,
+            heart_beat_timeout: self.heart_beat_timeout,
             address_to_runtime_info: inner.address_to_runtime_info.clone(),
         }))
     }

@@ -1,16 +1,6 @@
 syntax = "proto3";
 package global_scheduler_service;
 
-message RegisterRequest {
-	string address = 1;
-	repeated string fn_names = 2;
-}
-
-message RegisterResponse {
-	fixed64 lifetime_id = 1;
-	fixed64 heart_beat_timeout = 2;
-}
-
 message FnStats {
 	fixed64 completed = 1;
 	fixed64 pending = 2;
@@ -36,17 +26,6 @@ message RequestId {
 	fixed64 request_id = 2;
 }
 
-message FailedLocalTask {
-	fixed64 task_id = 1;
-	repeated RequestId requests = 2;
-}
-
-message CurrentRuntimeInfo {
-	fixed64 lifetime_id = 1;
-	Stats stats = 2;
-	repeated FailedLocalTask failed_local_tasks = 3;
-}
-
 message TaskFailure {
 	fixed64 lifetime_id = 1;
 	fixed64 task_id = 2;
@@ -62,12 +41,14 @@ message RuntimeInfo {
 message HeartBeatRequest {
 	fixed64 request_id = 1;
 	string address = 2;
-	CurrentRuntimeInfo current_runtime_info = 3;
+	RuntimeInfo current_runtime_info = 3;
 }
 
 message HeartBeatResponse {
 	fixed64 lifetime_id = 1;
-	map<string, RuntimeInfo> address_to_runtime_info = 2;
+	fixed64 next_expected_request_id = 2;
+	fixed64 heart_beat_timeout = 3;
+	map<string, RuntimeInfo> address_to_runtime_info = 4;
 }
 
 message RaftStepRequest {
@@ -81,7 +62,6 @@ message RaftStepResponse {
 }
 
 service GlobalSchedulerService {
-	rpc Register(RegisterRequest) returns (RegisterResponse);
 	rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
 	rpc RaftStep(RaftStepRequest) returns (RaftStepResponse);
 }

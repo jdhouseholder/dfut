@@ -1,6 +1,5 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
@@ -18,8 +17,8 @@ use crate::{
     seq::Seq,
     services::{
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
-            HeartBeatRequest, HeartBeatResponse, RegisterRequest, RegisterResponse, RequestId,
+            global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
+            HeartBeatResponse, RequestId, RuntimeInfo,
         },
         worker_service::ParentInfo,
     },
@@ -50,46 +49,15 @@ impl RootRuntimeClient {
     pub async fn new(global_scheduler_address: &str, unique_client_id: &str) -> Self {
         let shared = Arc::new(Mutex::new(SharedRuntimeClientState::default()));
 
-        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-
-        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
-
-        let RegisterResponse {
-            lifetime_id,
-            heart_beat_timeout,
-            ..
-        } = retry(&mut client, &endpoint, |mut client| {
-            let address = unique_client_id.to_string();
-            async move {
-                client
-                    .register(RegisterRequest {
-                        address,
-                        ..Default::default()
-                    })
-                    .await
-            }
-        })
-        .await
-        .expect("Unable to register.");
-
-        {
-            let mut shared = shared.lock().unwrap();
-            shared.lifetime_id = lifetime_id;
-        }
-
         let cancellation_token = CancellationToken::new();
         tokio::spawn({
             let cancellation_token = cancellation_token.clone();
             let shared = Arc::clone(&shared);
             let client_id = unique_client_id.to_string();
+            let global_scheduler_address = global_scheduler_address.to_string();
+
             async move {
-                let fut = Self::heart_beat_forever(
-                    client,
-                    client_id,
-                    endpoint,
-                    shared,
-                    heart_beat_timeout,
-                );
+                let fut = Self::heart_beat_forever(client_id, global_scheduler_address, shared);
 
                 tokio::select! {
                     _ = fut => {},
@@ -114,13 +82,13 @@ impl RootRuntimeClient {
     }
 
     async fn heart_beat_forever(
-        mut client: Option<GlobalSchedulerServiceClient<Channel>>,
         client_id: String,
-        endpoint: Endpoint,
+        global_scheduler_address: String,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
-        heart_beat_timeout: u64,
     ) {
-        let sleep_for = heart_beat_timeout / 3;
+        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+
         let mut request_id = 0u64;
         loop {
             let lifetime_id = {
@@ -130,6 +98,8 @@ impl RootRuntimeClient {
 
             let HeartBeatResponse {
                 lifetime_id,
+                heart_beat_timeout,
+                next_expected_request_id,
                 address_to_runtime_info,
                 ..
             } = retry(&mut client, &endpoint, |mut client| {
@@ -139,7 +109,7 @@ impl RootRuntimeClient {
                         .heart_beat(HeartBeatRequest {
                             request_id,
                             address: client_id,
-                            current_runtime_info: Some(CurrentRuntimeInfo {
+                            current_runtime_info: Some(RuntimeInfo {
                                 lifetime_id,
                                 // TODO: share failed local tasks.
                                 ..Default::default()
@@ -151,16 +121,17 @@ impl RootRuntimeClient {
             .await
             .unwrap();
 
-            request_id += 1;
+            request_id = next_expected_request_id;
 
-            let i = FnIndex::compute(&address_to_runtime_info, "");
             {
                 let mut shared = shared.lock().unwrap();
                 shared.lifetime_id = lifetime_id;
-                shared.fn_name_to_addresses = i;
+                shared
+                    .fn_name_to_addresses
+                    .update(&address_to_runtime_info, "");
             }
 
-            sleep_with_jitter(sleep_for).await;
+            sleep_with_jitter(heart_beat_timeout / 3).await;
         }
     }
 
@@ -243,12 +214,12 @@ impl RuntimeClient {
             'scheduled: loop {
                 {
                     let shared = self.shared.lock().unwrap();
-                    if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name) {
+                    if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name).await
+                    {
                         let lifetime_id = shared.lifetime_id;
                         break 'scheduled (address, lifetime_id);
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         };
 
@@ -311,14 +282,14 @@ impl RuntimeClient {
         match r {
             RetryState::Sender(work, tx) => {
                 for _ in 0..self.dfut_retries {
-                    let address = {
-                        self.shared
-                            .lock()
-                            .unwrap()
-                            .fn_name_to_addresses
-                            .schedule_fn(&work.fn_name)
-                            .unwrap()
-                    };
+                    let address = self
+                        .shared
+                        .lock()
+                        .unwrap()
+                        .fn_name_to_addresses
+                        .schedule_fn(&work.fn_name)
+                        .await
+                        .ok_or(Error::System)?;
 
                     let request_id = self.next_request_id(&address);
 

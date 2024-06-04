@@ -29,9 +29,8 @@ use crate::{
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, CurrentRuntimeInfo,
-            FailedLocalTask, HeartBeatRequest, HeartBeatResponse, RegisterRequest,
-            RegisterResponse, RequestId, RuntimeInfo,
+            global_scheduler_service_client::GlobalSchedulerServiceClient, FnStats,
+            HeartBeatRequest, HeartBeatResponse, RequestId, RuntimeInfo, Stats, TaskFailure,
         },
         worker_service::{
             worker_service_server::{WorkerService, WorkerServiceServer},
@@ -43,6 +42,18 @@ use crate::{
     work::{IntoWork, Work},
     DResult, Error,
 };
+
+fn populate_stats(fn_names: Vec<String>) -> Stats {
+    let fn_stats: HashMap<String, FnStats> = fn_names
+        .into_iter()
+        .map(|fn_name| (fn_name, FnStats::default()))
+        .collect();
+
+    Stats {
+        fn_stats,
+        ..Default::default()
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkerServerConfig {
@@ -72,14 +83,15 @@ struct SharedRuntimeState {
     next_task_id: AtomicU64,
     next_request_id: Arc<Mutex<Seq>>,
 
-    fn_name_to_addresses: Mutex<FnIndex>,
-    failed_local_tasks: Mutex<Vec<FailedLocalTask>>,
+    fn_name_to_addresses: FnIndex,
+    failed_local_tasks: Mutex<Vec<TaskFailure>>,
+
+    stats: Mutex<Stats>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RootRuntime {
     shared_runtime_state: Arc<SharedRuntimeState>,
-    heart_beat_timeout: u64,
 }
 
 pub struct RootRuntimeHandle {
@@ -138,25 +150,9 @@ impl RootRuntime {
             fn_names,
         } = cfg;
 
-        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let stats = populate_stats(Self::filter_fn_names(available_fn_names, fn_names));
 
-        let fn_names = Self::filter_fn_names(available_fn_names, fn_names);
-
-        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
-
-        let RegisterResponse {
-            lifetime_id,
-            heart_beat_timeout,
-            ..
-        } = retry(&mut client, &endpoint, |mut client| {
-            let address = local_server_address.to_string();
-            let fn_names = fn_names.clone();
-            async move { client.register(RegisterRequest { address, fn_names }).await }
-        })
-        .await
-        .expect("Unable to register.");
-
-        let lifetime_id = Arc::new(AtomicU64::new(lifetime_id));
+        let lifetime_id = Arc::new(AtomicU64::new(0));
 
         let address_to_gaps = AddressToGaps::default();
 
@@ -184,17 +180,19 @@ impl RootRuntime {
                 next_task_id: AtomicU64::new(0),
                 next_request_id: Arc::default(),
 
-                fn_name_to_addresses: Mutex::new(FnIndex::default()),
+                fn_name_to_addresses: FnIndex::default(),
                 failed_local_tasks: Mutex::default(),
-            }),
 
-            heart_beat_timeout,
+                stats: Mutex::new(stats),
+            }),
         };
 
         let heart_beat_fut = task_tracker.spawn({
             let root_runtime = root_runtime.clone();
             async move {
-                root_runtime.heart_beat_forever(endpoint, client).await;
+                root_runtime
+                    .heart_beat_forever(global_scheduler_address)
+                    .await;
             }
         });
 
@@ -314,13 +312,11 @@ impl RootRuntime {
         Ok(d_store_id.into())
     }
 
-    async fn heart_beat_forever(
-        &self,
-        endpoint: Endpoint,
-        mut global_scheduler: Option<GlobalSchedulerServiceClient<Channel>>,
-    ) {
+    async fn heart_beat_forever(&self, global_scheduler_address: String) {
+        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+
         // TODO: shutdown via select.
-        let sleep_for = self.heart_beat_timeout / 3;
         let mut request_id = 0u64;
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
@@ -333,22 +329,27 @@ impl RootRuntime {
                     .clone()
             };
 
+            let stats = { self.shared_runtime_state.stats.lock().unwrap().clone() };
+
             let HeartBeatResponse {
                 lifetime_id,
+                heart_beat_timeout,
+                next_expected_request_id,
                 address_to_runtime_info,
                 ..
-            } = retry(&mut global_scheduler, &endpoint, |mut client| {
+            } = retry(&mut client, &endpoint, |mut client| {
                 let address = self.shared_runtime_state.local_server_address.to_string();
+                let stats = stats.clone();
                 let failed_local_tasks = failed_local_tasks.clone();
                 async move {
                     client
                         .heart_beat(HeartBeatRequest {
                             request_id,
                             address,
-                            current_runtime_info: Some(CurrentRuntimeInfo {
+                            current_runtime_info: Some(RuntimeInfo {
                                 lifetime_id: local_lifetime_id,
-                                stats: None,
-                                failed_local_tasks,
+                                stats: Some(stats),
+                                task_failures: failed_local_tasks,
                             }),
                         })
                         .await
@@ -356,21 +357,12 @@ impl RootRuntime {
             })
             .await
             .unwrap();
-            // TODO: turn off the worker here so that we can full restart.
+            request_id = next_expected_request_id;
 
-            request_id += 1;
-
-            let fn_index = FnIndex::compute(
+            self.shared_runtime_state.fn_name_to_addresses.update(
                 &address_to_runtime_info,
                 &self.shared_runtime_state.local_server_address,
             );
-            {
-                *self
-                    .shared_runtime_state
-                    .fn_name_to_addresses
-                    .lock()
-                    .unwrap() = fn_index;
-            }
 
             {
                 let mut previous_address_to_runtime_info = self
@@ -443,7 +435,7 @@ impl RootRuntime {
 
             // TODO: insert tombstone for tasks that are running on this worker
 
-            sleep_with_jitter(sleep_for).await;
+            sleep_with_jitter(heart_beat_timeout / 3).await;
         }
     }
 }
@@ -617,14 +609,12 @@ impl Runtime {
                         return Err(Error::System);
                     }
 
-                    let address = {
-                        self.shared_runtime_state
-                            .fn_name_to_addresses
-                            .lock()
-                            .unwrap()
-                            .schedule_fn(&work.fn_name)
-                            .unwrap()
-                    };
+                    let address = self
+                        .shared_runtime_state
+                        .fn_name_to_addresses
+                        .schedule_fn(&work.fn_name)
+                        .await
+                        .ok_or(Error::System)?;
 
                     let parent_info = self.next_parent_info(&address);
 
@@ -808,9 +798,9 @@ impl Runtime {
                 .failed_local_tasks
                 .lock()
                 .unwrap()
-                .push(FailedLocalTask {
-                    // TODO: include lifetime_id.
+                .push(TaskFailure {
                     task_id: self.task_id,
+                    lifetime_id: self.lifetime_id,
                     requests: self.requests.lock().unwrap().clone(),
                 });
         }
@@ -927,14 +917,12 @@ impl Runtime {
     {
         let work = iw.into_work();
 
-        let address = {
-            self.shared_runtime_state
-                .fn_name_to_addresses
-                .lock()
-                .unwrap()
-                .schedule_fn(&work.fn_name)
-                .unwrap()
-        };
+        let address = self
+            .shared_runtime_state
+            .fn_name_to_addresses
+            .schedule_fn(&work.fn_name)
+            .await
+            .ok_or(Error::System)?;
 
         let parent_info = self.next_parent_info(&address);
 
