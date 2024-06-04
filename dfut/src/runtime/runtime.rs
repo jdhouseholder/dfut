@@ -84,7 +84,7 @@ struct SharedRuntimeState {
     next_request_id: Arc<Mutex<Seq>>,
 
     fn_name_to_addresses: FnIndex,
-    failed_local_tasks: Mutex<Vec<TaskFailure>>,
+    task_failures: Mutex<Vec<TaskFailure>>,
 
     stats: Mutex<Stats>,
 }
@@ -181,7 +181,7 @@ impl RootRuntime {
                 next_request_id: Arc::default(),
 
                 fn_name_to_addresses: FnIndex::default(),
-                failed_local_tasks: Mutex::default(),
+                task_failures: Mutex::default(),
 
                 stats: Mutex::new(stats),
             }),
@@ -330,9 +330,9 @@ impl RootRuntime {
         loop {
             let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
-            let failed_local_tasks = {
+            let task_failures = {
                 self.shared_runtime_state
-                    .failed_local_tasks
+                    .task_failures
                     .lock()
                     .unwrap()
                     .clone()
@@ -349,7 +349,7 @@ impl RootRuntime {
             } = retry(&mut client, &endpoint, |mut client| {
                 let address = self.shared_runtime_state.local_server_address.to_string();
                 let stats = stats.clone();
-                let failed_local_tasks = failed_local_tasks.clone();
+                let task_failures = task_failures.clone();
                 async move {
                     client
                         .heart_beat(HeartBeatRequest {
@@ -358,7 +358,7 @@ impl RootRuntime {
                             current_runtime_info: Some(RuntimeInfo {
                                 lifetime_id: local_lifetime_id,
                                 stats: Some(stats),
-                                task_failures: failed_local_tasks,
+                                task_failures,
                             }),
                         })
                         .await
@@ -802,9 +802,9 @@ impl Runtime {
         // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
         // will be handled by the lifetime failover logic.
         if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
-            counter!("failed_local_tasks::push").increment(1);
+            counter!("task_failures::push").increment(1);
             self.shared_runtime_state
-                .failed_local_tasks
+                .task_failures
                 .lock()
                 .unwrap()
                 .push(TaskFailure {
