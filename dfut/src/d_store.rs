@@ -246,6 +246,7 @@ impl LocalStore {
     }
 
     fn worker_failure(&self, address: &str, new_lifetime_id: u64) {
+        counter!("local_store::worker_failure").increment(1);
         let mut m = self.m.lock().unwrap();
 
         let mut remove = Vec::new();
@@ -257,6 +258,8 @@ impl LocalStore {
             }
         }
 
+        counter!("local_store::worker_failure::remove").increment(remove.len() as u64);
+
         for id in remove {
             if let Some(v) = m.remove(&id) {
                 if let ValueState::Watch { tx, .. } = v.value_state {
@@ -266,20 +269,23 @@ impl LocalStore {
         }
     }
 
-    fn task_failure(&self, address: &str, new_lifetime_id: u64, task_id: u64) {
+    fn task_failure(&self, address: &str, lifetime_id: u64, task_id: u64) {
+        counter!("local_store::task_failure").increment(1);
         let mut m = self.m.lock().unwrap();
 
         let mut remove = Vec::new();
         for (id, entry) in m.iter() {
             for parent_info in entry.parent_info.iter() {
                 if parent_info.address == address
-                    && parent_info.lifetime_id == new_lifetime_id
+                    && parent_info.lifetime_id == lifetime_id
                     && parent_info.task_id == task_id
                 {
                     remove.push(id.clone());
                 }
             }
         }
+
+        counter!("local_store::task_failure::remove").increment(remove.len() as u64);
 
         for id in remove {
             if let Some(v) = m.remove(&id) {
@@ -291,6 +297,7 @@ impl LocalStore {
     }
 
     fn local_task_failure(&self, d_store_id: DStoreId) {
+        counter!("local_store::local_task_failure").increment(1);
         let mut m = self.m.lock().unwrap();
         if let Some(v) = m.remove(&d_store_id) {
             match &v.value_state {
@@ -330,13 +337,26 @@ impl LocalStore {
             if parent_info.address == parent_address
                 && parent_info.lifetime_id == parent_lifetime_id
                 && parent_info.task_id == parent_task_id
-                && parent_info.request_id == request_id
+                && parent_info.request_id == Some(request_id)
             {
                 return Some(k.clone());
             }
         }
 
         None
+    }
+
+    pub fn emit_debug_output(&self) {
+        let m = self.m.lock().unwrap();
+
+        if m.is_empty() {
+            tracing::error!("DSTORE: empty");
+        } else {
+            tracing::error!("DSTORE:");
+            for (k, v) in m.iter() {
+                tracing::error!("{:?} {:?}", v.parent_info, k);
+            }
+        }
     }
 }
 
@@ -471,6 +491,10 @@ impl DStore {
             parent_task_id,
             request_id,
         )
+    }
+
+    pub fn emit_debug_output(&self) {
+        self.local_store.emit_debug_output();
     }
 }
 
@@ -757,7 +781,7 @@ mod local_store_test {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
-                request_id: 0,
+                request_id: Some(0),
             }]),
             key.clone(),
         );
@@ -805,7 +829,7 @@ mod local_store_test {
                 address: "address".to_string(),
                 lifetime_id: 0,
                 task_id: 0,
-                request_id: 0,
+                request_id: Some(0),
             }]),
             key.clone(),
         );

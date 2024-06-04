@@ -29,7 +29,7 @@ pub use d_scheduler::Where;
 pub use global_scheduler::GlobalScheduler;
 pub use runtime::{
     client::{RootRuntimeClient, RuntimeClient},
-    runtime::{RootRuntime, Runtime, WorkerServerConfig, WorkerServiceExt},
+    runtime::{RootRuntime, RootRuntimeHandle, Runtime, WorkerServerConfig, WorkerServiceExt},
 };
 pub use services::worker_service::{
     worker_service_client::WorkerServiceClient,

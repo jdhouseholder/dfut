@@ -5,7 +5,7 @@ message ParentInfo {
 	string address = 1;
 	fixed64 lifetime_id = 2;
 	fixed64 task_id = 3;
-	fixed64 request_id = 4;
+	optional fixed64 request_id = 4;
 }
 
 message DoWorkRequest {

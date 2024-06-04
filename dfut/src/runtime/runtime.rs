@@ -6,9 +6,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use metrics::histogram;
+use metrics::{counter, histogram};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::{
     transport::{Channel, Endpoint, Server},
     Status,
@@ -56,6 +57,8 @@ pub trait WorkerServiceExt: WorkerService {
 
 #[derive(Debug)]
 struct SharedRuntimeState {
+    task_tracker: TaskTracker,
+
     local_server_address: String,
     dfut_retries: usize,
 
@@ -79,6 +82,35 @@ pub struct RootRuntime {
     heart_beat_timeout: u64,
 }
 
+pub struct RootRuntimeHandle {
+    cancellation_token: CancellationToken,
+    task_tracker: TaskTracker,
+    root_runtime: RootRuntime,
+}
+
+impl RootRuntimeHandle {
+    pub fn emit_debug_output(&self) {
+        tracing::error!(
+            "{:#?}",
+            self.root_runtime
+                .shared_runtime_state
+                .address_to_runtime_info
+                .lock()
+                .unwrap()
+        );
+        self.root_runtime
+            .shared_runtime_state
+            .d_store
+            .emit_debug_output();
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancellation_token.cancel();
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
+    }
+}
+
 impl RootRuntime {
     fn filter_fn_names(available_fn_names: Vec<String>, fn_names: Vec<String>) -> Vec<String> {
         if fn_names.len() > 0 {
@@ -93,7 +125,10 @@ impl RootRuntime {
         }
     }
 
-    pub async fn serve<T>(cfg: WorkerServerConfig, available_fn_names: Vec<String>)
+    pub async fn serve<T>(
+        cfg: WorkerServerConfig,
+        available_fn_names: Vec<String>,
+    ) -> RootRuntimeHandle
     where
         T: WorkerServiceExt,
     {
@@ -129,8 +164,12 @@ impl RootRuntime {
             DStore::new(&local_server_address, &lifetime_id, address_to_gaps.clone()).await,
         );
 
+        let cancellation_token = CancellationToken::new();
+        let task_tracker = TaskTracker::new();
+
         let root_runtime = Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
+                task_tracker: task_tracker.clone(),
                 local_server_address: local_server_address.to_string(),
                 // TODO: pass in through config
                 dfut_retries: DFUT_RETRIES,
@@ -152,7 +191,7 @@ impl RootRuntime {
             heart_beat_timeout,
         };
 
-        let heart_beat_fut = tokio::spawn({
+        let heart_beat_fut = task_tracker.spawn({
             let root_runtime = root_runtime.clone();
             async move {
                 root_runtime.heart_beat_forever(endpoint, client).await;
@@ -161,12 +200,12 @@ impl RootRuntime {
 
         let serve_fut = Server::builder()
             .add_service(
-                DStoreServiceServer::new(d_store)
+                DStoreServiceServer::new(Arc::clone(&d_store))
                     .max_encoding_message_size(usize::MAX)
                     .max_decoding_message_size(usize::MAX),
             )
             .add_service(
-                WorkerServiceServer::new(T::new(root_runtime))
+                WorkerServiceServer::new(T::new(root_runtime.clone()))
                     .max_encoding_message_size(usize::MAX)
                     .max_decoding_message_size(usize::MAX),
             )
@@ -179,9 +218,21 @@ impl RootRuntime {
                     .unwrap(),
             );
 
-        tokio::select! {
-            r = serve_fut => r.unwrap(),
-            _ = heart_beat_fut => {},
+        task_tracker.spawn({
+            let cancellation_token = cancellation_token.clone();
+            async move {
+                tokio::select! {
+                    r = serve_fut => r.unwrap(),
+                    _ = heart_beat_fut => {},
+                    _ = cancellation_token.cancelled() => {},
+                }
+            }
+        });
+
+        RootRuntimeHandle {
+            cancellation_token,
+            task_tracker,
+            root_runtime,
         }
     }
 
@@ -235,7 +286,7 @@ impl RootRuntime {
         let parent_address = &parent_task.address;
         let parent_lifetime_id = parent_task.lifetime_id;
         let parent_task_id = parent_task.task_id;
-        let request_id = parent_task.request_id;
+        let request_id = parent_task.request_id.unwrap();
 
         self.validate_lifetime_id(parent_address, parent_lifetime_id)?;
 
@@ -357,7 +408,11 @@ impl RootRuntime {
                             if request.address == self.shared_runtime_state.local_server_address {
                                 self.shared_runtime_state
                                     .address_to_gaps
-                                    .try_reset(address, runtime_info.lifetime_id);
+                                    .have_seen_request_id(
+                                        address,
+                                        runtime_info.lifetime_id,
+                                        request.request_id,
+                                    );
                             }
                         }
                     }
@@ -469,17 +524,13 @@ impl Runtime {
                 }
 
                 if parent_runtime_info.lifetime_id == parent_info.lifetime_id {
-                    let mut failure = false;
                     for task_failure in &parent_runtime_info.task_failures {
                         if task_failure.lifetime_id == parent_info.lifetime_id
                             && task_failure.task_id == parent_info.task_id
                         {
-                            failure = true;
-                            break;
+                            counter!("check_runtime_state::fail").increment(1);
+                            return Err(Error::System);
                         }
-                    }
-                    if failure {
-                        return Err(Error::System);
                     }
                 }
             }
@@ -503,6 +554,7 @@ impl Runtime {
             .lock()
             .unwrap()
             .next(address);
+
         self.requests.lock().unwrap().push(RequestId {
             address: address.to_string(),
             request_id,
@@ -514,7 +566,7 @@ impl Runtime {
             address: self.shared_runtime_state.local_server_address.clone(),
             lifetime_id: self.lifetime_id,
             task_id: self.task_id,
-            request_id,
+            request_id: Some(request_id),
         });
 
         parent_info
@@ -555,6 +607,16 @@ impl Runtime {
         match r {
             RetryState::Sender(work, tx) => {
                 for _ in 0..self.shared_runtime_state.dfut_retries {
+                    if let Err(_) = self.check_runtime_state() {
+                        self.inner
+                            .lock()
+                            .unwrap()
+                            .calls
+                            .insert(d_store_id.clone(), Call::RetriedErr);
+
+                        return Err(Error::System);
+                    }
+
                     let address = {
                         self.shared_runtime_state
                             .fn_name_to_addresses
@@ -579,21 +641,23 @@ impl Runtime {
                         .await;
 
                     if let Ok(t) = t {
-                        let mut inner = self.inner.lock().unwrap();
                         let v: Arc<dyn ValueTrait> = Arc::new(t.clone());
-                        inner
+                        self.inner
+                            .lock()
+                            .unwrap()
                             .calls
                             .insert(d_store_id.clone(), Call::RetriedOk { v: Arc::clone(&v) });
                         let _ = tx.send(v);
 
                         return Ok(t);
                     }
-
-                    self.check_runtime_state()?;
                 }
 
-                let mut inner = self.inner.lock().unwrap();
-                inner.calls.insert(d_store_id.clone(), Call::RetriedErr);
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .insert(d_store_id.clone(), Call::RetriedErr);
 
                 return Err(Error::System);
             }
@@ -616,7 +680,7 @@ impl Runtime {
 
         if let Some(valid) = self.is_valid_id(&d_fut.d_store_id) {
             if !valid {
-                return self.try_retry_dfut(&d_fut.d_store_id).await;
+                return Err(Error::System);
             }
         }
 
@@ -709,12 +773,12 @@ impl Runtime {
 }
 
 impl Runtime {
-    fn new_child(&self, parent_info: &Arc<Vec<ParentInfo>>) -> Runtime {
+    fn new_local_child(&self, parent_info: Vec<ParentInfo>) -> Runtime {
         Runtime {
             shared_runtime_state: Arc::clone(&self.shared_runtime_state),
 
             lifetime_id: self.lifetime_id,
-            parent_info: Arc::clone(parent_info),
+            parent_info: Arc::new(parent_info),
             task_id: self
                 .shared_runtime_state
                 .next_task_id
@@ -738,14 +802,17 @@ impl Runtime {
 
         // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
         // will be handled by the lifetime failover logic.
-        let mut failed_local_tasks = self.shared_runtime_state.failed_local_tasks.lock().unwrap();
-        // Only push to failed tasks if we are on the current lifetime_id, otherwise the task fail
-        // will be handled by the lifetime failover logic.
         if self.lifetime_id == self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
-            failed_local_tasks.push(FailedLocalTask {
-                task_id: self.task_id,
-                requests: self.requests.lock().unwrap().clone(),
-            });
+            counter!("failed_local_tasks::push").increment(1);
+            self.shared_runtime_state
+                .failed_local_tasks
+                .lock()
+                .unwrap()
+                .push(FailedLocalTask {
+                    // TODO: include lifetime_id.
+                    task_id: self.task_id,
+                    requests: self.requests.lock().unwrap().clone(),
+                });
         }
     }
 
@@ -760,14 +827,7 @@ impl Runtime {
     {
         let d_store_id = self.next_d_store_id();
 
-        self.track_call(
-            d_store_id.clone(),
-            Call::Local {
-                fn_name: fn_name.to_string(),
-            },
-        );
-
-        tokio::spawn({
+        self.shared_runtime_state.task_tracker.spawn({
             // TODO: I don't like that we pass two references to the same runtime into the spawn:
             // once here and once in the macro. Figure out how to fix this.
             let rt = self.clone();
@@ -800,13 +860,22 @@ impl Runtime {
                     return;
                 }
 
-                // TODO: check parent lifeitime id vs rt.parent_info.lifeitime
-                // If the entry was removed then publish will fail. So we can ignore the Error.
-                let _ = rt.shared_runtime_state.d_store.publish(d_store_id, t);
+                if let Err(_) = rt
+                    .shared_runtime_state
+                    .d_store
+                    .publish(d_store_id.clone(), t)
+                {
+                    rt.track_failed_task(d_store_id);
+                    return;
+                }
             }
         });
 
         d_store_id
+    }
+
+    fn track_call(&self, d_store_id: DStoreId, call: Call) {
+        self.inner.lock().unwrap().calls.insert(d_store_id, call);
     }
 
     pub fn do_local_work_fut<F, T, FutFn>(&self, fn_name: &str, f: FutFn) -> DFut<T>
@@ -815,18 +884,29 @@ impl Runtime {
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
         FutFn: FnOnce(Runtime) -> F,
     {
-        let r = self.new_child(&self.parent_info);
-        let fut = f(r);
-        let d_store_id = self.do_local_work(fn_name, fut);
+        let mut parent_info = (*self.parent_info).clone();
+        parent_info.push(ParentInfo {
+            address: self.shared_runtime_state.local_server_address.clone(),
+            lifetime_id: self.lifetime_id,
+            task_id: self.task_id,
+            request_id: None,
+        });
+
+        let r = self.new_local_child(parent_info);
+        let fut = f(r.clone());
+        let d_store_id = r.do_local_work(fn_name, fut);
+
+        self.track_call(
+            d_store_id.clone(),
+            Call::Local {
+                fn_name: fn_name.to_string(),
+            },
+        );
+
         d_store_id.into()
     }
 
-    fn track_call(&self, d_store_id: DStoreId, call: Call) {
-        self.inner.lock().unwrap().calls.insert(d_store_id, call);
-    }
-
     fn next_d_store_id(&self) -> DStoreId {
-        // TODO: pass owner info to d_store to allow for parent based cleanup.
         self.shared_runtime_state
             .d_store
             .take_next_id(Arc::clone(&self.parent_info), self.task_id)

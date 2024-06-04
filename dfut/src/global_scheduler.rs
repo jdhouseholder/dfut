@@ -2,6 +2,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::error;
 
@@ -31,6 +32,16 @@ pub struct GlobalScheduler {
     lifetime_timeout: Duration,
 }
 
+pub struct GlobalSchedulerHandle {
+    cancellation_token: CancellationToken,
+}
+
+impl GlobalSchedulerHandle {
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
+    }
+}
+
 impl GlobalScheduler {
     async fn expire_lifetimes(self: &Arc<Self>) {
         // Proposal that expires lifetime ids based on timeout.
@@ -47,7 +58,11 @@ impl GlobalScheduler {
         }
     }
 
-    pub async fn serve(address: &str, _peers: Vec<String>, lifetime_timeout: Duration) {
+    pub async fn serve(
+        address: &str,
+        _peers: Vec<String>,
+        lifetime_timeout: Duration,
+    ) -> GlobalSchedulerHandle {
         let global_scheduler = Arc::new(Self {
             lifetime_timeout,
             ..Default::default()
@@ -74,10 +89,20 @@ impl GlobalScheduler {
             .add_service(GlobalSchedulerServiceServer::new(global_scheduler))
             .serve(address);
 
-        tokio::select! {
-            _ = jh => {}
-            r = serve => r.unwrap(),
-        }
+        let cancellation_token = CancellationToken::new();
+
+        tokio::spawn({
+            let cancellation_token = cancellation_token.clone();
+            async move {
+                tokio::select! {
+                    _ = jh => {}
+                    r = serve => r.unwrap(),
+                    _ = cancellation_token.cancelled() => {}
+                }
+            }
+        });
+
+        GlobalSchedulerHandle { cancellation_token }
     }
 }
 
@@ -156,6 +181,7 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         let current_lifetime_id = current_runtime_info.lifetime_id;
 
+        // TODO: Just set, don't merge.
         match inner.address_to_runtime_info.entry(address.clone()) {
             Entry::Occupied(ref mut o) => {
                 // TODO: merge

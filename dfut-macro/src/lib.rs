@@ -284,12 +284,12 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            pub async fn serve(worker_server_config: dfut::WorkerServerConfig) {
+            pub async fn serve(worker_server_config: dfut::WorkerServerConfig) -> dfut::RootRuntimeHandle {
                 let available_fn_names = vec![#(#fn_names.to_string()),*];
                 dfut::RootRuntime::serve::<#server_ident>(
                     worker_server_config,
                     available_fn_names,
-                ).await;
+                ).await
             }
 
             pub async fn d_await<T>(&self, d_fut: dfut::DFut<T>) -> dfut::DResult<T>

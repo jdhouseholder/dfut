@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::{
@@ -29,7 +30,6 @@ use crate::{
 
 #[derive(Debug, Default)]
 struct SharedRuntimeClientState {
-    client_id: String,
     lifetime_id: u64,
     next_task_id: u64,
 
@@ -37,6 +37,9 @@ struct SharedRuntimeClientState {
 }
 
 pub struct RootRuntimeClient {
+    cancellation_token: CancellationToken,
+
+    client_id: Arc<String>,
     shared: Arc<Mutex<SharedRuntimeClientState>>,
     next_request_id: Arc<Mutex<Seq>>,
     peer_worker_client: PeerWorkerClient,
@@ -71,16 +74,34 @@ impl RootRuntimeClient {
 
         {
             let mut shared = shared.lock().unwrap();
-            shared.client_id = unique_client_id.to_string();
             shared.lifetime_id = lifetime_id;
         }
 
+        let cancellation_token = CancellationToken::new();
         tokio::spawn({
+            let cancellation_token = cancellation_token.clone();
             let shared = Arc::clone(&shared);
-            async move { Self::heart_beat_forever(client, endpoint, shared, heart_beat_timeout).await }
+            let client_id = unique_client_id.to_string();
+            async move {
+                let fut = Self::heart_beat_forever(
+                    client,
+                    client_id,
+                    endpoint,
+                    shared,
+                    heart_beat_timeout,
+                );
+
+                tokio::select! {
+                    _ = fut => {},
+                    _ = cancellation_token.cancelled() => {},
+                };
+            }
         });
 
         Self {
+            cancellation_token,
+
+            client_id: Arc::new(unique_client_id.to_string()),
             shared,
             next_request_id: Arc::default(),
             peer_worker_client: PeerWorkerClient::new(),
@@ -88,8 +109,13 @@ impl RootRuntimeClient {
         }
     }
 
+    pub async fn shutdown(self) {
+        self.cancellation_token.cancel();
+    }
+
     async fn heart_beat_forever(
         mut client: Option<GlobalSchedulerServiceClient<Channel>>,
+        client_id: String,
         endpoint: Endpoint,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
         heart_beat_timeout: u64,
@@ -97,9 +123,9 @@ impl RootRuntimeClient {
         let sleep_for = heart_beat_timeout / 3;
         let mut request_id = 0u64;
         loop {
-            let (client_id, lifetime_id) = {
+            let lifetime_id = {
                 let shared = shared.lock().unwrap();
-                (shared.client_id.clone(), shared.lifetime_id)
+                shared.lifetime_id
             };
 
             let HeartBeatResponse {
@@ -140,14 +166,19 @@ impl RootRuntimeClient {
 
     pub fn new_runtime_client(&self) -> RuntimeClient {
         let mut shared = self.shared.lock().unwrap();
+
+        let lifetime_id = shared.lifetime_id;
         let task_id = shared.next_task_id;
         shared.next_task_id += 1;
 
         RuntimeClient {
+            client_id: Arc::clone(&self.client_id),
             shared: Arc::clone(&self.shared),
             next_request_id: Arc::clone(&self.next_request_id),
             peer_worker_client: self.peer_worker_client.clone(),
             d_store_client: self.d_store_client.clone(),
+
+            lifetime_id,
             task_id,
 
             calls: Mutex::new(HashMap::new()),
@@ -168,11 +199,13 @@ enum ClientCall {
 // They must maintain a lifetime and each real client must have a unique (address, lifetime id, task id) triple.
 // TODO: retry in the client too.
 pub struct RuntimeClient {
+    client_id: Arc<String>,
     shared: Arc<Mutex<SharedRuntimeClientState>>,
     next_request_id: Arc<Mutex<Seq>>,
     peer_worker_client: PeerWorkerClient,
     d_store_client: DStoreClient,
 
+    lifetime_id: u64,
     task_id: u64,
 
     calls: Mutex<HashMap<DStoreId, ClientCall>>,
@@ -184,7 +217,7 @@ impl RuntimeClient {
     fn rpc_context(&self) -> RpcContext {
         let shared = self.shared.lock().unwrap();
         RpcContext {
-            local_address: shared.client_id.clone(),
+            local_address: (*self.client_id).clone(),
             lifetime_id: shared.lifetime_id,
             next_request_id: Arc::clone(&self.next_request_id),
             requests: Arc::clone(&self.requests),
@@ -206,14 +239,13 @@ impl RuntimeClient {
     {
         let w = iw.into_work();
         // TODO: fail if we don't eventually schedule?
-        let (client_id, address, lifetime_id) = {
+        let (address, lifetime_id) = {
             'scheduled: loop {
                 {
                     let shared = self.shared.lock().unwrap();
                     if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name) {
-                        let client_id = shared.client_id.clone();
                         let lifetime_id = shared.lifetime_id;
-                        break 'scheduled (client_id, address, lifetime_id);
+                        break 'scheduled (address, lifetime_id);
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -226,10 +258,10 @@ impl RuntimeClient {
             .peer_worker_client
             .do_work(
                 &[ParentInfo {
-                    address: client_id.clone(),
+                    address: (*self.client_id).clone(),
                     lifetime_id,
                     task_id: self.task_id,
-                    request_id,
+                    request_id: Some(request_id),
                 }],
                 &address,
                 w.clone(),
@@ -279,34 +311,30 @@ impl RuntimeClient {
         match r {
             RetryState::Sender(work, tx) => {
                 for _ in 0..self.dfut_retries {
-                    let (client_id, lifetime_id, task_id, address) = {
-                        let mut shared = self.shared.lock().unwrap();
-                        let address = shared
+                    let address = {
+                        self.shared
+                            .lock()
+                            .unwrap()
                             .fn_name_to_addresses
                             .schedule_fn(&work.fn_name)
-                            .unwrap();
-                        let client_id = shared.client_id.clone();
-                        let lifetime_id = shared.lifetime_id;
-                        let task_id = shared.next_task_id;
-                        shared.next_task_id += 1;
-                        (client_id, lifetime_id, task_id, address)
+                            .unwrap()
                     };
 
                     let request_id = self.next_request_id(&address);
 
+                    let parent_info = ParentInfo {
+                        address: (*self.client_id).clone(),
+                        lifetime_id: self.lifetime_id,
+                        task_id: self.task_id,
+                        request_id: Some(request_id),
+                    };
+
                     let d_store_id = self
                         .peer_worker_client
-                        .do_work(
-                            &[ParentInfo {
-                                address: client_id.clone(),
-                                lifetime_id,
-                                task_id,
-                                request_id,
-                            }],
-                            &address,
-                            work.clone(),
-                        )
+                        .do_work(&[parent_info.clone()], &address, work.clone())
                         .await?;
+
+                    tracing::error!("retrying {:?} new={:?}", parent_info, d_store_id);
 
                     let t: DResult<T> = self
                         .d_store_client
