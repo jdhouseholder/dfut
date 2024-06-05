@@ -8,8 +8,7 @@ use crate::{
     services::global_scheduler_service::{FnStats, RuntimeInfo, Stats},
 };
 
-const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
-                                             //
+const STAY_LOCAL_THRESHOLD: f64 = (2 << 16) as f64; // 64KiB
 
 #[allow(unused)]
 fn f_dur(x: f64) -> f64 {
@@ -18,7 +17,7 @@ fn f_dur(x: f64) -> f64 {
 
 #[allow(unused)]
 fn f_bytes(x: f64) -> f64 {
-    x.log2()
+    1. / (1. + x.log2())
 }
 
 #[derive(Debug)]
@@ -98,20 +97,22 @@ impl DScheduler {
     }
 
     pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Option<Where> {
+        let arg_size = arg_size as f64;
+
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
         let (dur, ret_size) = {
             let mut inner = self.inner.lock().unwrap();
 
             inner.local_stats.pending += 1;
-            inner.local_stats.avg_call_bytes.next(arg_size as f64);
+            inner.local_stats.avg_call_bytes.next(arg_size);
 
             let fn_stats = inner
                 .local_stats
                 .fn_stats
                 .entry(fn_name.to_string())
                 .or_default();
-            fn_stats.avg_call_bytes.next(arg_size as f64);
+            fn_stats.avg_call_bytes.next(arg_size);
             fn_stats.pending += 1;
 
             let dur = fn_stats.avg_dur_ms.avg();
@@ -121,13 +122,14 @@ impl DScheduler {
 
         // 1. Increase local probability if large args or ret.
         // 2. Decrease local probability if the avg duration is large.
-        let s = if arg_size as f64 + ret_size >= STAY_LOCAL_THRESHOLD as f64 {
-            0.8
+        let size = arg_size + ret_size;
+        let b_p = if size < STAY_LOCAL_THRESHOLD {
+            f_bytes(size)
         } else {
-            0.5
+            0.
         };
-        let d = if dur > 1. { 1. / (2. + dur) } else { 0. };
-        let p = s - d;
+
+        let p = f_dur(dur) - b_p;
 
         let f: f64 = rand::random();
         let local = f < p;
@@ -149,21 +151,20 @@ impl DScheduler {
 
     pub fn schedule_fn(&self, fn_name: &str) -> Option<String> {
         for _ in 0..50 {
-            if let Some(address) = self
-                .inner
-                .lock()
-                .unwrap()
-                .index
-                .get(fn_name)?
-                .choose(&mut rand::thread_rng())
-                .map(|s| {
-                    counter!("schedule_fn", "fn_name" => fn_name.to_string(), "choice" => s.clone())
-                    .increment(1);
-                    s.clone()
-                })
-                .clone()
             {
-                return Some(address);
+                let inner = self.inner.lock().unwrap();
+
+                let maybe_address = inner
+                    .index
+                    .get(fn_name)?
+                    .choose(&mut rand::thread_rng())
+                    .map(|s| s.clone());
+
+                if let Some(address) = maybe_address {
+                    counter!("schedule_fn", "fn_name" => fn_name.to_string(), "choice" => address.clone())
+                    .increment(1);
+                    return Some(address);
+                }
             }
 
             sleep(Duration::from_millis(10));

@@ -354,7 +354,10 @@ impl RuntimeClient {
 
         match t {
             Ok(t) => Ok(t),
-            Err(_) => self.try_retry_dfut(&d_fut.d_store_id).await,
+            Err(e) => {
+                tracing::error!("wait: {e:?}");
+                self.try_retry_dfut(&d_fut.d_store_id).await
+            }
         }
     }
 

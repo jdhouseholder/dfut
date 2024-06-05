@@ -3,7 +3,7 @@ use std::{future::Future, time::Duration};
 use rand::Rng;
 use tokio::time::sleep;
 use tonic::{transport::Endpoint, Code, Response, Status};
-use tracing::error;
+use tracing::{error, trace};
 
 use crate::{
     client_pool::{ClientPool, Connect},
@@ -30,7 +30,7 @@ where
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(e) => match e.code() {
                     Code::NotFound | Code::InvalidArgument => {
-                        error!("rpc_with_retry: {e:?}");
+                        trace!("rpc_with_retry: {e:?}");
                         return Err(Error::System);
                     }
                     _ => error!("rpc_with_retry: {e:?}"),
@@ -66,7 +66,7 @@ where
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(e) => match e.code() {
                     Code::NotFound | Code::InvalidArgument => {
-                        error!("rpc_with_retry: {e:?}");
+                        trace!("rpc_with_retry: {e:?}");
                         return Err(Error::System);
                     }
                     _ => error!("rpc_with_retry: {e:?}"),
