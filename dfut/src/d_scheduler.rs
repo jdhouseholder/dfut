@@ -47,7 +47,7 @@ struct Inner {
     index: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct DScheduler {
     inner: Mutex<Inner>,
 }

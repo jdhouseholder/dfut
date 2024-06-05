@@ -9,8 +9,8 @@ use tonic::transport::{Channel, Endpoint};
 use crate::{
     consts::DFUT_RETRIES,
     d_fut::DFut,
+    d_scheduler::DScheduler,
     d_store::{DStoreClient, DStoreId, ValueTrait},
-    fn_index::FnIndex,
     peer_work::PeerWorkerClient,
     retry::retry,
     rpc_context::RpcContext,
@@ -32,7 +32,7 @@ struct SharedRuntimeClientState {
     lifetime_id: u64,
     next_task_id: u64,
 
-    fn_name_to_addresses: FnIndex,
+    d_scheduler: DScheduler,
 }
 
 pub struct RootRuntimeClient {
@@ -131,9 +131,7 @@ impl RootRuntimeClient {
             {
                 let mut shared = shared.lock().unwrap();
                 shared.lifetime_id = lifetime_id;
-                shared
-                    .fn_name_to_addresses
-                    .update("", &address_to_runtime_info);
+                shared.d_scheduler.update("", &address_to_runtime_info);
             }
 
             sleep_with_jitter(heart_beat_timeout / 3).await;
@@ -219,8 +217,7 @@ impl RuntimeClient {
             'scheduled: loop {
                 {
                     let shared = self.shared.lock().unwrap();
-                    if let Some(address) = shared.fn_name_to_addresses.schedule_fn(&w.fn_name).await
-                    {
+                    if let Some(address) = shared.d_scheduler.schedule_fn(&w.fn_name).await {
                         let lifetime_id = shared.lifetime_id;
                         break 'scheduled (address, lifetime_id);
                     }
@@ -291,7 +288,7 @@ impl RuntimeClient {
                         .shared
                         .lock()
                         .unwrap()
-                        .fn_name_to_addresses
+                        .d_scheduler
                         .schedule_fn(&work.fn_name)
                         .await
                         .ok_or(Error::System)?;
