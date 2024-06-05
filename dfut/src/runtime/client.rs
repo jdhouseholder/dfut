@@ -217,7 +217,7 @@ impl RuntimeClient {
             'scheduled: loop {
                 {
                     let shared = self.shared.lock().unwrap();
-                    if let Some(address) = shared.d_scheduler.schedule_fn(&w.fn_name).await {
+                    if let Some(address) = shared.d_scheduler.schedule_fn(&w.fn_name) {
                         let lifetime_id = shared.lifetime_id;
                         break 'scheduled (address, lifetime_id);
                     }
@@ -290,7 +290,6 @@ impl RuntimeClient {
                         .unwrap()
                         .d_scheduler
                         .schedule_fn(&work.fn_name)
-                        .await
                         .ok_or(Error::System)?;
 
                     let request_id = self.next_request_id(&address);

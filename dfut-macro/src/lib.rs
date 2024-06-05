@@ -154,7 +154,7 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
 
                         let size = #(#fn_arg_size)+*;
 
-                        match self.runtime.schedule_work(fn_name, size) {
+                        match self.runtime.schedule_work(fn_name, size)? {
                             dfut::Where::Local => {
                                 Ok(self.runtime.do_local_work_fut(
                                     fn_name,
@@ -163,8 +163,8 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                                     }
                                 ))
                             },
-                            dfut::Where::Remote { .. } => {
-                                self.runtime.do_remote_work(#work_enum_ident::#work_variant_ident {
+                            dfut::Where::Remote { address } => {
+                                self.runtime.do_remote_work(&address, #work_enum_ident::#work_variant_ident {
                                     #(#fn_arg_idents),*
                                 }).await
                             }

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Mutex, thread::sleep, time::Duration};
 
 use metrics::counter;
 use rand::seq::SliceRandom;
@@ -8,11 +6,21 @@ use rand::seq::SliceRandom;
 use crate::{
     ema::EMA,
     services::global_scheduler_service::{FnStats, RuntimeInfo, Stats},
-    sleep::sleep_with_jitter,
 };
 
 const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
                                              //
+
+#[allow(unused)]
+fn f_dur(x: f64) -> f64 {
+    1. / (1. + x)
+}
+
+#[allow(unused)]
+fn f_bytes(x: f64) -> f64 {
+    x.log2()
+}
+
 #[derive(Debug)]
 pub enum Where {
     Remote { address: String },
@@ -89,7 +97,7 @@ impl DScheduler {
         }
     }
 
-    pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Where {
+    pub fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Option<Where> {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
         let (dur, ret_size) = {
@@ -112,7 +120,7 @@ impl DScheduler {
         };
 
         // 1. Increase local probability if large args or ret.
-        // 2. Decrease local probability if the historical duration is large.
+        // 2. Decrease local probability if the avg duration is large.
         let s = if arg_size as f64 + ret_size >= STAY_LOCAL_THRESHOLD as f64 {
             0.8
         } else {
@@ -130,17 +138,17 @@ impl DScheduler {
         )
         .increment(1);
 
-        if local {
+        Some(if local {
             Where::Local
         } else {
             Where::Remote {
-                address: "TODO: decide peer here.".to_string(),
+                address: self.schedule_fn(fn_name)?,
             }
-        }
+        })
     }
 
-    pub async fn schedule_fn(&self, fn_name: &str) -> Option<String> {
-        for _ in 0..5 {
+    pub fn schedule_fn(&self, fn_name: &str) -> Option<String> {
+        for _ in 0..50 {
             if let Some(address) = self
                 .inner
                 .lock()
@@ -157,18 +165,19 @@ impl DScheduler {
             {
                 return Some(address);
             }
-            sleep_with_jitter(100).await;
+
+            sleep(Duration::from_millis(10));
         }
         return None;
     }
 
-    pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {
-        let took = 1_000. * took.as_secs_f64();
+    pub(crate) fn finish_local_work(&self, fn_name: &str, dur: Duration, ret_size: usize) {
+        let dur = 1_000. * dur.as_secs_f64();
         let mut inner = self.inner.lock().unwrap();
 
         inner.local_stats.pending -= 1;
         inner.local_stats.completed += 1;
-        inner.local_stats.avg_dur_ms.next(took);
+        inner.local_stats.avg_dur_ms.next(dur);
         inner.local_stats.avg_ret_bytes.next(ret_size as f64);
 
         let fn_stats = inner
@@ -180,7 +189,7 @@ impl DScheduler {
         fn_stats.pending -= 1;
         fn_stats.completed += 1;
 
-        fn_stats.avg_dur_ms.next(took);
+        fn_stats.avg_dur_ms.next(dur);
         fn_stats.avg_ret_bytes.next(ret_size as f64);
     }
 

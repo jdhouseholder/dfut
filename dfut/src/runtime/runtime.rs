@@ -650,7 +650,6 @@ impl Runtime {
                         .shared_runtime_state
                         .d_scheduler
                         .schedule_fn(&work.fn_name)
-                        .await
                         .ok_or(Error::System)?;
 
                     let parent_info = self.next_parent_info(&address);
@@ -816,10 +815,11 @@ impl Runtime {
         }
     }
 
-    pub fn schedule_work(&self, fn_name: &str, arg_size: usize) -> Where {
+    pub fn schedule_work(&self, fn_name: &str, arg_size: usize) -> DResult<Where> {
         self.shared_runtime_state
             .d_scheduler
             .accept_local_work(fn_name, arg_size)
+            .ok_or(Error::System)
     }
 
     fn track_task_failure(&self, d_store_id: DStoreId) {
@@ -949,18 +949,11 @@ impl Runtime {
     // for local computation. We only use it for remote computation.
     //
     // Put work into local queue or remote queue.
-    pub async fn do_remote_work<I, T>(&self, iw: I) -> DResult<DFut<T>>
+    pub async fn do_remote_work<I, T>(&self, address: &str, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
     {
         let work = iw.into_work();
-
-        let address = self
-            .shared_runtime_state
-            .d_scheduler
-            .schedule_fn(&work.fn_name)
-            .await
-            .ok_or(Error::System)?;
 
         let parent_info = self.next_parent_info(&address);
 
