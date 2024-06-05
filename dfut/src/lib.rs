@@ -8,6 +8,7 @@ mod consts;
 mod d_fut;
 mod d_scheduler;
 mod d_store;
+mod ema;
 mod fn_index;
 mod gaps;
 mod global_scheduler;

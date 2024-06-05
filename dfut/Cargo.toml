@@ -20,6 +20,11 @@ prost = "0.12.4"
 tower-service = "0.3.2"
 http = "0.2.11"
 
+raft = "0.7.0"
+slog = "2.7.0"
+slog-stdlog = "4.1.1"
+protobuf = "2.28.0"
+
 dfut-macro = { path = "../dfut-macro" }
 
 [build-dependencies]

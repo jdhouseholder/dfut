@@ -45,16 +45,17 @@ message HeartBeatRequest {
 }
 
 message HeartBeatResponse {
-	fixed64 lifetime_id = 1;
-	fixed64 next_expected_request_id = 2;
-	fixed64 heart_beat_timeout = 3;
-	map<string, RuntimeInfo> address_to_runtime_info = 4;
+	optional string leader_address = 1; 
+	fixed64 lifetime_id = 2;
+	fixed64 next_expected_request_id = 3;
+	fixed64 heart_beat_timeout = 4;
+	map<string, RuntimeInfo> address_to_runtime_info = 5;
 }
 
 message RaftStepRequest {
-	oneof req_type {
-		string proposal = 1;
-		string msg = 2;
+	oneof inner {
+		bytes msg = 1;
+		bytes cc = 2;
 	}
 }
 

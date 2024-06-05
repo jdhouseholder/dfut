@@ -29,8 +29,11 @@ where
             match f(client).await {
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(e) => match e.code() {
-                    Code::NotFound | Code::InvalidArgument => return Err(Error::System),
-                    _ => error!("rpc_with_retry: {:?}", e),
+                    Code::NotFound | Code::InvalidArgument => {
+                        error!("rpc_with_retry: {e:?}");
+                        return Err(Error::System);
+                    }
+                    _ => error!("rpc_with_retry: {e:?}"),
                 },
             }
         }
@@ -62,8 +65,11 @@ where
             match f(client.clone()).await {
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(e) => match e.code() {
-                    Code::NotFound | Code::InvalidArgument => return Err(Error::System),
-                    _ => error!("rpc_with_retry: {:?}", e),
+                    Code::NotFound | Code::InvalidArgument => {
+                        error!("rpc_with_retry: {e:?}");
+                        return Err(Error::System);
+                    }
+                    _ => error!("rpc_with_retry: {e:?}"),
                 },
             }
         }

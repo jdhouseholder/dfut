@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use metrics::counter;
+
+use crate::{ema::EMA, services::global_scheduler_service::Stats};
 
 const STAY_LOCAL_THRESHOLD: usize = 2 << 16; // 64KiB // 2 << 32; // 1GiB
                                              //
@@ -12,48 +14,37 @@ pub enum Where {
     Local,
 }
 
-#[allow(unused)]
-#[derive(Debug, Default, Clone)]
-struct CallStats {
-    arg_size: usize,
-}
-
-#[derive(Debug, Default, Clone)]
-struct RetStats {
-    dur: Duration,
-    ret_size: usize,
-}
-
 #[derive(Debug, Default, Clone)]
 struct FnStats {
-    call_stats: Vec<CallStats>,
-    ret_stats: Vec<RetStats>,
+    avg_arg_size: EMA,
+    avg_dur: EMA,
+    avg_ret_size: EMA,
 }
 
 impl FnStats {
     fn track_call(&mut self, arg_size: usize) {
-        self.call_stats.push(CallStats { arg_size });
-    }
-
-    fn track_ret(&mut self, dur: std::time::Duration, ret_size: usize) {
-        self.ret_stats.push(RetStats { dur, ret_size });
+        self.avg_arg_size.next(arg_size as f64);
     }
 }
 
 #[derive(Debug, Default, Clone)]
-struct Stats {
+struct LocalStats {
     fn_stats: HashMap<String, FnStats>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct DScheduler {
-    // TODO: When it is fun performance time we move this out of a mutex and
-    // use a lock free data structure. We don't have any benchmarks/analysis to
-    // justify not using this mutex so we'll do the simple thing first.
-    stats: Mutex<Stats>,
+    runtime_info_stats: Arc<Mutex<Stats>>,
+    stats: Mutex<LocalStats>,
 }
 
 impl DScheduler {
+    pub fn new(runtime_info_stats: &Arc<Mutex<Stats>>) -> Self {
+        Self {
+            runtime_info_stats: Arc::clone(runtime_info_stats),
+            stats: Mutex::default(),
+        }
+    }
     pub(crate) fn accept_local_work(&self, fn_name: &str, arg_size: usize) -> Where {
         // Check local stats.
         // Decide if we have enough of the DFuts locally or if they are mainly on another peer.
@@ -61,17 +52,15 @@ impl DScheduler {
             let mut stats = self.stats.lock().unwrap();
             let fn_stats = stats.fn_stats.entry(fn_name.to_string()).or_default();
             fn_stats.track_call(arg_size);
-            let (dur, ret_size) = fn_stats
-                .ret_stats
-                .last()
-                .map(|RetStats { dur, ret_size }| (dur.as_secs_f64(), *ret_size))
-                .unwrap_or((0f64, 0usize));
+
+            let dur = fn_stats.avg_dur.avg();
+            let ret_size = fn_stats.avg_ret_size.avg();
             (dur, ret_size)
         };
 
         // 1. Increase local probability if large args or ret.
         // 2. Decrease local probability if the historical duration is large.
-        let s = if arg_size + ret_size >= STAY_LOCAL_THRESHOLD {
+        let s = if arg_size as f64 + ret_size >= STAY_LOCAL_THRESHOLD as f64 {
             0.8
         } else {
             0.5
@@ -98,12 +87,20 @@ impl DScheduler {
     }
 
     pub(crate) fn finish_local_work(&self, fn_name: &str, took: Duration, ret_size: usize) {
-        self.stats
-            .lock()
-            .unwrap()
-            .fn_stats
-            .entry(fn_name.to_string())
-            .or_default()
-            .track_ret(took, ret_size);
+        let (avg_call_bytes, avg_dur, avg_ret_size) = {
+            let mut local_stats = self.stats.lock().unwrap();
+            let fn_stats = local_stats.fn_stats.entry(fn_name.to_string()).or_default();
+            let avg_call_bytes = fn_stats.avg_arg_size.avg();
+            let avg_dur = fn_stats.avg_dur.next(took.as_secs_f64());
+            let avg_ret_size = fn_stats.avg_ret_size.next(ret_size as f64);
+            (avg_call_bytes, avg_dur, avg_ret_size)
+        };
+
+        let mut stats = self.runtime_info_stats.lock().unwrap();
+        let fn_stats = stats.fn_stats.entry(fn_name.to_string()).or_default();
+
+        fn_stats.avg_call_bytes = avg_call_bytes as u64;
+        fn_stats.avg_latency = 1_000 * avg_dur as u64; // ms
+        fn_stats.avg_ret_bytes = avg_ret_size as u64;
     }
 }

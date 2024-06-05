@@ -86,7 +86,7 @@ impl RootRuntimeClient {
         global_scheduler_address: String,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
     ) {
-        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
 
         let mut request_id = 0u64;
@@ -97,6 +97,7 @@ impl RootRuntimeClient {
             };
 
             let HeartBeatResponse {
+                leader_address,
                 lifetime_id,
                 heart_beat_timeout,
                 next_expected_request_id,
@@ -120,6 +121,10 @@ impl RootRuntimeClient {
             })
             .await
             .unwrap();
+            if let Some(leader_address) = leader_address {
+                endpoint = leader_address.parse().unwrap();
+                continue;
+            }
 
             request_id = next_expected_request_id;
 

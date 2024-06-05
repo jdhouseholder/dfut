@@ -114,7 +114,8 @@ impl AddressToGaps {
         }
         if gaps.lifetime_id() > parent_lifetime_id {
             // TODO: This would mean that there is a system bug.
-            unreachable!()
+            tracing::error!("GAPS UNREACHABLE");
+            return false;
         }
 
         gaps.add(request_id).is_seen()

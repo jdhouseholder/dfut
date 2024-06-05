@@ -77,7 +77,7 @@ struct SharedRuntimeState {
     fn_name_to_addresses: FnIndex,
     task_failures: Mutex<Vec<TaskFailure>>,
 
-    stats: Mutex<Stats>,
+    stats: Arc<Mutex<Stats>>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +160,8 @@ impl RootRuntime {
         let cancellation_token = CancellationToken::new();
         let task_tracker = TaskTracker::new();
 
+        let stats = Arc::new(Mutex::new(stats));
+
         let root_runtime = Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 task_tracker: task_tracker.clone(),
@@ -167,7 +169,7 @@ impl RootRuntime {
                 // TODO: pass in through config
                 dfut_retries: DFUT_RETRIES,
 
-                d_scheduler: DScheduler::default(),
+                d_scheduler: DScheduler::new(&stats),
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store: Arc::clone(&d_store),
 
@@ -180,7 +182,7 @@ impl RootRuntime {
                 fn_name_to_addresses: FnIndex::default(),
                 task_failures: Mutex::default(),
 
-                stats: Mutex::new(stats),
+                stats,
             }),
         };
 
@@ -356,7 +358,7 @@ impl RootRuntime {
         global_scheduler_address: String,
         heart_beat_timeout_tx: WatchTx<u64>,
     ) {
-        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
         let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
 
         // TODO: shutdown via select.
@@ -375,6 +377,7 @@ impl RootRuntime {
             let stats = { self.shared_runtime_state.stats.lock().unwrap().clone() };
 
             let HeartBeatResponse {
+                leader_address,
                 lifetime_id,
                 heart_beat_timeout,
                 next_expected_request_id,
@@ -400,6 +403,10 @@ impl RootRuntime {
             })
             .await
             .unwrap();
+            if let Some(leader_address) = leader_address {
+                endpoint = leader_address.parse().unwrap();
+                continue;
+            }
 
             heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();
             request_id = next_expected_request_id;
