@@ -5,7 +5,7 @@ message FnStats {
 	fixed64 completed = 1;
 	fixed64 pending = 2;
 
-	fixed64 avg_latency = 3;
+	fixed64 avg_dur_ms = 3;
 	fixed64 avg_call_bytes = 4;
 	fixed64 avg_ret_bytes = 5;
 }
@@ -14,7 +14,7 @@ message Stats {
 	fixed64 completed = 1;
 	fixed64 pending = 2;
 
-	fixed64 avg_latency = 3;
+	fixed64 avg_dur_ms = 3;
 	fixed64 avg_call_bytes = 4;
 	fixed64 avg_ret_bytes = 5;
 

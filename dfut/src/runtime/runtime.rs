@@ -23,7 +23,6 @@ use crate::{
     d_fut::DFut,
     d_scheduler::{DScheduler, Where},
     d_store::{DStore, DStoreId, ValueTrait},
-    fn_index::FnIndex,
     gaps::AddressToGaps,
     peer_work::PeerWorkerClient,
     retry::retry,
@@ -32,8 +31,8 @@ use crate::{
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, FnStats,
-            HeartBeatRequest, HeartBeatResponse, RequestId, RuntimeInfo, Stats, TaskFailure,
+            global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
+            HeartBeatResponse, RequestId, RuntimeInfo, TaskFailure,
         },
         worker_service::{
             worker_service_server::{WorkerService, WorkerServiceServer},
@@ -74,10 +73,7 @@ struct SharedRuntimeState {
     next_task_id: AtomicU64,
     next_request_id: Arc<Mutex<Seq>>,
 
-    fn_name_to_addresses: FnIndex,
     task_failures: Mutex<Vec<TaskFailure>>,
-
-    stats: Arc<Mutex<Stats>>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,13 +137,7 @@ impl RootRuntime {
             fn_names,
         } = cfg;
 
-        let stats = Stats {
-            fn_stats: Self::filter_fn_names(available_fn_names, fn_names)
-                .into_iter()
-                .map(|fn_name| (fn_name, FnStats::default()))
-                .collect(),
-            ..Default::default()
-        };
+        let fn_names = Self::filter_fn_names(available_fn_names, fn_names);
 
         let lifetime_id = Arc::new(AtomicU64::new(0));
 
@@ -160,8 +150,6 @@ impl RootRuntime {
         let cancellation_token = CancellationToken::new();
         let task_tracker = TaskTracker::new();
 
-        let stats = Arc::new(Mutex::new(stats));
-
         let root_runtime = Self {
             shared_runtime_state: Arc::new(SharedRuntimeState {
                 task_tracker: task_tracker.clone(),
@@ -169,7 +157,7 @@ impl RootRuntime {
                 // TODO: pass in through config
                 dfut_retries: DFUT_RETRIES,
 
-                d_scheduler: DScheduler::new(&stats),
+                d_scheduler: DScheduler::new(fn_names),
                 peer_worker_client: PeerWorkerClient::new(),
                 d_store: Arc::clone(&d_store),
 
@@ -179,10 +167,7 @@ impl RootRuntime {
                 next_task_id: AtomicU64::new(0),
                 next_request_id: Arc::default(),
 
-                fn_name_to_addresses: FnIndex::default(),
                 task_failures: Mutex::default(),
-
-                stats,
             }),
         };
 
@@ -374,7 +359,7 @@ impl RootRuntime {
                     .clone()
             };
 
-            let stats = { self.shared_runtime_state.stats.lock().unwrap().clone() };
+            let stats = self.shared_runtime_state.d_scheduler.output_stats();
 
             let HeartBeatResponse {
                 leader_address,
@@ -411,9 +396,9 @@ impl RootRuntime {
             heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();
             request_id = next_expected_request_id;
 
-            self.shared_runtime_state.fn_name_to_addresses.update(
-                &address_to_runtime_info,
+            self.shared_runtime_state.d_scheduler.update(
                 &self.shared_runtime_state.local_server_address,
+                &address_to_runtime_info,
             );
 
             {
@@ -663,7 +648,7 @@ impl Runtime {
 
                     let address = self
                         .shared_runtime_state
-                        .fn_name_to_addresses
+                        .d_scheduler
                         .schedule_fn(&work.fn_name)
                         .await
                         .ok_or(Error::System)?;
@@ -972,7 +957,7 @@ impl Runtime {
 
         let address = self
             .shared_runtime_state
-            .fn_name_to_addresses
+            .d_scheduler
             .schedule_fn(&work.fn_name)
             .await
             .ok_or(Error::System)?;

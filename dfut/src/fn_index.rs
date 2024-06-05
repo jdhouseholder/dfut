@@ -14,20 +14,19 @@ pub struct FnIndex {
 impl FnIndex {
     pub fn update(
         &self,
-        address_to_runtime_info: &HashMap<String, RuntimeInfo>,
         current_address: &str,
+        address_to_runtime_info: &HashMap<String, RuntimeInfo>,
     ) {
         let mut m: HashMap<String, Vec<String>> = HashMap::new();
 
         for (address, runtime_info) in address_to_runtime_info {
-            if address == current_address {
-                continue;
-            }
-            if let Some(stats) = &runtime_info.stats {
-                for fn_name in stats.fn_stats.keys() {
-                    m.entry(fn_name.to_string())
-                        .or_default()
-                        .push(address.to_string());
+            if address != current_address {
+                if let Some(stats) = &runtime_info.stats {
+                    for fn_name in stats.fn_stats.keys() {
+                        m.entry(fn_name.to_string())
+                            .or_default()
+                            .push(address.to_string());
+                    }
                 }
             }
         }

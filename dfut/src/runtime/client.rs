@@ -133,7 +133,7 @@ impl RootRuntimeClient {
                 shared.lifetime_id = lifetime_id;
                 shared
                     .fn_name_to_addresses
-                    .update(&address_to_runtime_info, "");
+                    .update("", &address_to_runtime_info);
             }
 
             sleep_with_jitter(heart_beat_timeout / 3).await;
