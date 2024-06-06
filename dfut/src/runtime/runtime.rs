@@ -389,6 +389,7 @@ impl RootRuntime {
             .await
             .unwrap();
             if let Some(leader_address) = leader_address {
+                tracing::info!("leader change");
                 endpoint = leader_address.parse().unwrap();
                 continue;
             }
@@ -402,7 +403,7 @@ impl RootRuntime {
             );
 
             {
-                let mut previous_address_to_runtime_info = self
+                let mut local_address_to_runtime_info = self
                     .shared_runtime_state
                     .address_to_runtime_info
                     .lock()
@@ -410,8 +411,7 @@ impl RootRuntime {
 
                 // worker_failure
                 for (address, runtime_info) in &address_to_runtime_info {
-                    if let Some(previous_runtime_info) =
-                        previous_address_to_runtime_info.get(address)
+                    if let Some(previous_runtime_info) = local_address_to_runtime_info.get(address)
                     {
                         if previous_runtime_info.lifetime_id < runtime_info.lifetime_id {
                             self.shared_runtime_state
@@ -447,10 +447,11 @@ impl RootRuntime {
                     }
                 }
 
-                *previous_address_to_runtime_info = address_to_runtime_info;
+                *local_address_to_runtime_info = address_to_runtime_info;
             }
 
             if lifetime_id != local_lifetime_id {
+                tracing::error!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
                 // If we hit this case it means we didn't renew our lifetime lease, so either the
                 // global scheduler died or there has been a network partition. So we can actually
                 // continue to compute the current values and put them into a temporary store.
@@ -469,8 +470,6 @@ impl RootRuntime {
                 // don't reset the object_id.
                 self.shared_runtime_state.d_store.clear();
             }
-
-            // TODO: insert tombstone for tasks that are running on this worker
 
             sleep_with_jitter(heart_beat_timeout / 3).await;
         }

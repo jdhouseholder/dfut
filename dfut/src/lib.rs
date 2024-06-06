@@ -26,7 +26,7 @@ pub type DResult<T> = Result<T, Error>;
 
 pub use d_fut::DFut;
 pub use d_scheduler::Where;
-pub use global_scheduler::GlobalScheduler;
+pub use global_scheduler::{GlobalScheduler, GlobalSchedulerCfg};
 pub use runtime::{
     client::{RootRuntimeClient, RuntimeClient},
     runtime::{RootRuntime, RootRuntimeHandle, Runtime, WorkerServerConfig, WorkerServiceExt},
