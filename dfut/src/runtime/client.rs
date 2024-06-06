@@ -17,8 +17,9 @@ use crate::{
     seq::Seq,
     services::{
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
-            HeartBeatResponse, RequestId, RuntimeInfo,
+            global_scheduler_service_client::GlobalSchedulerServiceClient,
+            heart_beat_response::HeartBeatResponseType, BadRequest, HeartBeat, HeartBeatRequest,
+            HeartBeatResponse, NotLeader, RequestId, RuntimeInfo,
         },
         worker_service::ParentInfo,
     },
@@ -50,14 +51,40 @@ impl RootRuntimeClient {
         let shared = Arc::new(Mutex::new(SharedRuntimeClientState::default()));
 
         let cancellation_token = CancellationToken::new();
+
+        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+
+        let mut request_id = 0u64;
+        let mut heart_beat_timeout = 0u64;
+
+        while !Self::heart_beat_once(
+            &mut endpoint,
+            &mut client,
+            &mut request_id,
+            &mut heart_beat_timeout,
+            unique_client_id,
+            &shared,
+        )
+        .await
+        {
+            sleep_with_jitter(heart_beat_timeout / 3).await;
+        }
+
         tokio::spawn({
             let cancellation_token = cancellation_token.clone();
             let shared = Arc::clone(&shared);
             let client_id = unique_client_id.to_string();
-            let global_scheduler_address = global_scheduler_address.to_string();
 
             async move {
-                let fut = Self::heart_beat_forever(client_id, global_scheduler_address, shared);
+                let fut = Self::heart_beat_forever(
+                    &mut endpoint,
+                    &mut client,
+                    &mut request_id,
+                    &mut heart_beat_timeout,
+                    client_id,
+                    shared,
+                );
 
                 tokio::select! {
                     _ = fut => {},
@@ -81,60 +108,107 @@ impl RootRuntimeClient {
         self.cancellation_token.cancel();
     }
 
+    async fn heart_beat_once(
+        endpoint: &mut Endpoint,
+        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        request_id: &mut u64,
+        next_heart_beat_timeout: &mut u64,
+        client_id: &str,
+        shared: &Arc<Mutex<SharedRuntimeClientState>>,
+    ) -> bool {
+        let lifetime_id = {
+            let shared = shared.lock().unwrap();
+            shared.lifetime_id
+        };
+
+        let HeartBeatResponse {
+            heart_beat_response_type,
+        } = retry(client, &*endpoint, |mut client| {
+            let request_id = *request_id;
+            let client_id = client_id.to_string();
+            async move {
+                client
+                    .heart_beat(HeartBeatRequest {
+                        request_id,
+                        address: client_id,
+                        current_runtime_info: Some(RuntimeInfo {
+                            lifetime_id,
+                            // TODO: share failed local tasks.
+                            ..Default::default()
+                        }),
+                    })
+                    .await
+            }
+        })
+        .await
+        .unwrap();
+
+        let HeartBeat {
+            lifetime_id,
+            heart_beat_timeout,
+            next_expected_request_id,
+            address_to_runtime_info,
+            ..
+        } = match heart_beat_response_type {
+            Some(HeartBeatResponseType::HeartBeat(heart_beat)) => heart_beat,
+            Some(HeartBeatResponseType::BadRequest(BadRequest {
+                lifetime_id,
+                next_expected_request_id,
+            })) => {
+                shared.lock().unwrap().lifetime_id = lifetime_id;
+                *request_id = next_expected_request_id;
+                return false;
+            }
+            Some(HeartBeatResponseType::NotLeader(NotLeader { leader_address })) => {
+                match leader_address {
+                    Some(leader_address) => {
+                        *endpoint = leader_address.parse().unwrap();
+                        return false;
+                    }
+                    None => {
+                        return false;
+                    }
+                }
+            }
+            None => panic!(),
+        };
+
+        *request_id = next_expected_request_id;
+        *next_heart_beat_timeout = heart_beat_timeout;
+
+        {
+            let mut shared = shared.lock().unwrap();
+
+            if shared.lifetime_id != lifetime_id {
+                shared.lifetime_id = lifetime_id;
+                tracing::trace!("client: set lifetime_id to {lifetime_id}");
+            }
+
+            shared.d_scheduler.update("", &address_to_runtime_info);
+        }
+
+        true
+    }
+
     async fn heart_beat_forever(
+        endpoint: &mut Endpoint,
+        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        request_id: &mut u64,
+        heart_beat_timeout: &mut u64,
         client_id: String,
-        global_scheduler_address: String,
         shared: Arc<Mutex<SharedRuntimeClientState>>,
     ) {
-        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
-
-        let mut request_id = 0u64;
         loop {
-            let lifetime_id = {
-                let shared = shared.lock().unwrap();
-                shared.lifetime_id
-            };
-
-            let HeartBeatResponse {
-                leader_address,
-                lifetime_id,
+            Self::heart_beat_once(
+                endpoint,
+                client,
+                request_id,
                 heart_beat_timeout,
-                next_expected_request_id,
-                address_to_runtime_info,
-                ..
-            } = retry(&mut client, &endpoint, |mut client| {
-                let client_id = client_id.clone();
-                async move {
-                    client
-                        .heart_beat(HeartBeatRequest {
-                            request_id,
-                            address: client_id,
-                            current_runtime_info: Some(RuntimeInfo {
-                                lifetime_id,
-                                // TODO: share failed local tasks.
-                                ..Default::default()
-                            }),
-                        })
-                        .await
-                }
-            })
-            .await
-            .unwrap();
-            if let Some(leader_address) = leader_address {
-                endpoint = leader_address.parse().unwrap();
-                continue;
-            }
-
-            request_id = next_expected_request_id;
-
-            {
-                let mut shared = shared.lock().unwrap();
-                shared.lifetime_id = lifetime_id;
-                shared.d_scheduler.update("", &address_to_runtime_info);
-            }
-
-            sleep_with_jitter(heart_beat_timeout / 3).await;
+                &client_id,
+                &shared,
+            )
+            .await;
+            sleep_with_jitter(*heart_beat_timeout / 3).await;
         }
     }
 

@@ -44,12 +44,36 @@ message HeartBeatRequest {
 	RuntimeInfo current_runtime_info = 3;
 }
 
-message HeartBeatResponse {
+message HeartBeatResponse1 {
 	optional string leader_address = 1; 
 	fixed64 lifetime_id = 2;
 	fixed64 next_expected_request_id = 3;
 	fixed64 heart_beat_timeout = 4;
 	map<string, RuntimeInfo> address_to_runtime_info = 5;
+}
+
+message NotLeader {
+	optional string leader_address = 1;
+}
+
+message HeartBeat {
+	fixed64 lifetime_id = 1;
+	fixed64 next_expected_request_id = 2;
+	fixed64 heart_beat_timeout = 3;
+	map<string, RuntimeInfo> address_to_runtime_info = 4;
+}
+
+message BadRequest {
+	fixed64 lifetime_id = 1;
+	fixed64 next_expected_request_id = 2;
+}
+
+message HeartBeatResponse {
+	oneof heart_beat_response_type {
+		NotLeader not_leader = 1;
+		HeartBeat heart_beat = 2;
+		BadRequest bad_request = 3;
+	}
 }
 
 message RaftStepRequest {

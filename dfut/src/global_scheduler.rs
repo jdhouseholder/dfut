@@ -25,8 +25,10 @@ use tonic::{transport::Server, Request, Response, Status};
 use crate::services::global_scheduler_service::{
     global_scheduler_service_client::GlobalSchedulerServiceClient,
     global_scheduler_service_server::{GlobalSchedulerService, GlobalSchedulerServiceServer},
+    heart_beat_response::HeartBeatResponseType,
     raft_step_request::Inner,
-    HeartBeatRequest, HeartBeatResponse, RaftStepRequest, RaftStepResponse, RuntimeInfo,
+    BadRequest, HeartBeat, HeartBeatRequest, HeartBeatResponse, NotLeader, RaftStepRequest,
+    RaftStepResponse, RuntimeInfo,
 };
 
 // Since heart beat timeouts are large (on the order of seconds) we can probably just use epoch
@@ -85,8 +87,6 @@ struct InnerGlobalScheduler {
 // TODO: Rename to Global Coordinator Service (or Global Control Service)
 #[derive(Debug)]
 pub struct GlobalScheduler {
-    address: String,
-
     inner: Mutex<InnerGlobalScheduler>,
 
     heart_beat_timeout: u128,
@@ -136,8 +136,6 @@ impl GlobalScheduler {
         let (raft_tx, rx) = channel::<Proposal>(100);
 
         let global_scheduler = Arc::new(GlobalScheduler {
-            address: cfg.address.to_string(),
-
             inner: Mutex::new(InnerGlobalScheduler {
                 leader_state: LeaderState::IAm,
                 ..Default::default()
@@ -262,16 +260,24 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         let mut inner = self.inner.lock().unwrap();
 
-        let leader_address = match &inner.leader_state {
-            LeaderState::IAm => None,
+        match &inner.leader_state {
+            LeaderState::IAm => {}
             LeaderState::TheyAre(address) => {
                 tracing::error!("redirecting to {address}");
                 return Ok(Response::new(HeartBeatResponse {
-                    leader_address: Some(address.to_string()),
-                    ..Default::default()
+                    heart_beat_response_type: Some(HeartBeatResponseType::NotLeader(NotLeader {
+                        leader_address: Some(address.to_string()),
+                    })),
                 }));
             }
-            LeaderState::Unknown => Some(self.address.to_string()),
+            LeaderState::Unknown => {
+                tracing::error!("Unknown leader");
+                return Ok(Response::new(HeartBeatResponse {
+                    heart_beat_response_type: Some(HeartBeatResponseType::NotLeader(NotLeader {
+                        leader_address: None,
+                    })),
+                }));
+            }
         };
 
         let max_request_id = inner
@@ -286,7 +292,15 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
                 request_id,
                 *max_request_id
             );
-            return Err(Status::cancelled("request_id too low."));
+            let next_expected_request_id = *max_request_id;
+            let lifetime_id = inner.replicated.lifetimes.get(&address).unwrap().id;
+
+            return Ok(Response::new(HeartBeatResponse {
+                heart_beat_response_type: Some(HeartBeatResponseType::BadRequest(BadRequest {
+                    lifetime_id,
+                    next_expected_request_id,
+                })),
+            }));
         }
 
         *max_request_id = request_id;
@@ -360,11 +374,12 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
         self.maybe_propose(&inner);
 
         Ok(Response::new(HeartBeatResponse {
-            leader_address,
-            lifetime_id,
-            next_expected_request_id,
-            heart_beat_timeout: self.heart_beat_timeout as u64,
-            address_to_runtime_info,
+            heart_beat_response_type: Some(HeartBeatResponseType::HeartBeat(HeartBeat {
+                lifetime_id,
+                next_expected_request_id,
+                heart_beat_timeout: self.heart_beat_timeout as u64,
+                address_to_runtime_info,
+            })),
         }))
     }
 

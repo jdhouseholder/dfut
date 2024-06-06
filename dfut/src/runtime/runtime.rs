@@ -31,8 +31,9 @@ use crate::{
     services::{
         d_store_service::d_store_service_server::DStoreServiceServer,
         global_scheduler_service::{
-            global_scheduler_service_client::GlobalSchedulerServiceClient, HeartBeatRequest,
-            HeartBeatResponse, RequestId, RuntimeInfo, TaskFailure,
+            global_scheduler_service_client::GlobalSchedulerServiceClient,
+            heart_beat_response::HeartBeatResponseType, BadRequest, HeartBeat, HeartBeatRequest,
+            HeartBeatResponse, NotLeader, RequestId, RuntimeInfo, TaskFailure,
         },
         worker_service::{
             worker_service_server::{WorkerService, WorkerServiceServer},
@@ -174,11 +175,35 @@ impl RootRuntime {
         let (heart_beat_timeout_tx, mut heart_beat_timeout_rx) = watch_channel(0);
         heart_beat_timeout_rx.mark_unchanged();
 
+        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+        let mut request_id = 0u64;
+        let mut heart_beat_timeout = 100;
+
+        while !root_runtime
+            .heart_beat_once(
+                &mut endpoint,
+                &mut client,
+                &mut request_id,
+                &mut heart_beat_timeout,
+                &heart_beat_timeout_tx,
+            )
+            .await
+        {
+            sleep_with_jitter(heart_beat_timeout / 3).await;
+        }
+
         let heart_beat_fut = task_tracker.spawn({
             let root_runtime = root_runtime.clone();
             async move {
                 root_runtime
-                    .heart_beat_forever(global_scheduler_address, heart_beat_timeout_tx)
+                    .heart_beat_forever(
+                        &mut endpoint,
+                        &mut client,
+                        &mut request_id,
+                        &mut heart_beat_timeout,
+                        &heart_beat_timeout_tx,
+                    )
                     .await;
             }
         });
@@ -322,7 +347,7 @@ impl RootRuntime {
         let mut last_task_failures = Vec::new();
         loop {
             let heart_beat_timeout = *heart_beat_timeout_rx.borrow();
-            sleep_with_jitter(3 * heart_beat_timeout).await;
+            sleep_with_jitter(heart_beat_timeout / 3).await;
 
             {
                 let mut task_failures = self.shared_runtime_state.task_failures.lock().unwrap();
@@ -338,140 +363,183 @@ impl RootRuntime {
         }
     }
 
-    async fn heart_beat_forever(
+    async fn heart_beat_once(
         &self,
-        global_scheduler_address: String,
-        heart_beat_timeout_tx: WatchTx<u64>,
-    ) {
-        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+        endpoint: &mut Endpoint,
+        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        request_id: &mut u64,
+        next_heart_beat_timeout: &mut u64,
+        heart_beat_timeout_tx: &WatchTx<u64>,
+    ) -> bool {
+        let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
 
-        // TODO: shutdown via select.
-        let mut request_id = 0u64;
-        loop {
-            let local_lifetime_id = self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst);
+        let task_failures = {
+            self.shared_runtime_state
+                .task_failures
+                .lock()
+                .unwrap()
+                .clone()
+        };
 
-            let task_failures = {
-                self.shared_runtime_state
-                    .task_failures
-                    .lock()
-                    .unwrap()
-                    .clone()
-            };
+        let stats = self.shared_runtime_state.d_scheduler.output_stats();
 
-            let stats = self.shared_runtime_state.d_scheduler.output_stats();
+        let HeartBeatResponse {
+            heart_beat_response_type,
+        } = retry(client, &endpoint, |mut client| {
+            let request_id = *request_id;
+            let address = self.shared_runtime_state.local_server_address.to_string();
+            let stats = stats.clone();
+            let task_failures = task_failures.clone();
+            async move {
+                client
+                    .heart_beat(HeartBeatRequest {
+                        request_id,
+                        address,
+                        current_runtime_info: Some(RuntimeInfo {
+                            lifetime_id: local_lifetime_id,
+                            stats: Some(stats),
+                            task_failures,
+                        }),
+                    })
+                    .await
+            }
+        })
+        .await
+        .unwrap();
 
-            let HeartBeatResponse {
-                leader_address,
+        let HeartBeat {
+            lifetime_id,
+            heart_beat_timeout,
+            next_expected_request_id,
+            address_to_runtime_info,
+            ..
+        } = match heart_beat_response_type {
+            Some(HeartBeatResponseType::HeartBeat(heart_beat)) => heart_beat,
+            Some(HeartBeatResponseType::BadRequest(BadRequest {
                 lifetime_id,
-                heart_beat_timeout,
                 next_expected_request_id,
-                address_to_runtime_info,
-                ..
-            } = retry(&mut client, &endpoint, |mut client| {
-                let address = self.shared_runtime_state.local_server_address.to_string();
-                let stats = stats.clone();
-                let task_failures = task_failures.clone();
-                async move {
-                    client
-                        .heart_beat(HeartBeatRequest {
-                            request_id,
-                            address,
-                            current_runtime_info: Some(RuntimeInfo {
-                                lifetime_id: local_lifetime_id,
-                                stats: Some(stats),
-                                task_failures,
-                            }),
-                        })
-                        .await
+            })) => {
+                if lifetime_id != self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
+                    tracing::info!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
+                    self.shared_runtime_state
+                        .lifetime_id
+                        .store(lifetime_id, Ordering::SeqCst);
+                    self.shared_runtime_state.d_store.clear();
                 }
-            })
-            .await
-            .unwrap();
-            if let Some(leader_address) = leader_address {
-                tracing::info!("leader change");
-                endpoint = leader_address.parse().unwrap();
-                continue;
+                *request_id = next_expected_request_id;
+                return false;
+            }
+            Some(HeartBeatResponseType::NotLeader(NotLeader { leader_address })) => {
+                match leader_address {
+                    Some(leader_address) => {
+                        *endpoint = leader_address.parse().unwrap();
+                        return false;
+                    }
+                    None => {
+                        return false;
+                    }
+                }
+            }
+            None => panic!(),
+        };
+
+        *next_heart_beat_timeout = heart_beat_timeout;
+        heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();
+        *request_id = next_expected_request_id;
+
+        self.shared_runtime_state.d_scheduler.update(
+            &self.shared_runtime_state.local_server_address,
+            &address_to_runtime_info,
+        );
+
+        {
+            let mut local_address_to_runtime_info = self
+                .shared_runtime_state
+                .address_to_runtime_info
+                .lock()
+                .unwrap();
+
+            // worker_failure
+            for (address, runtime_info) in &address_to_runtime_info {
+                if let Some(previous_runtime_info) = local_address_to_runtime_info.get(address) {
+                    if previous_runtime_info.lifetime_id < runtime_info.lifetime_id {
+                        self.shared_runtime_state
+                            .d_store
+                            .worker_failure(address, runtime_info.lifetime_id);
+                        self.shared_runtime_state
+                            .address_to_gaps
+                            .try_reset(address, runtime_info.lifetime_id);
+                    }
+                }
             }
 
-            heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();
-            request_id = next_expected_request_id;
+            // task_failure
+            for (address, runtime_info) in &address_to_runtime_info {
+                for task_failure in &runtime_info.task_failures {
+                    self.shared_runtime_state.d_store.task_failure(
+                        address,
+                        task_failure.lifetime_id,
+                        task_failure.task_id,
+                    );
 
-            self.shared_runtime_state.d_scheduler.update(
-                &self.shared_runtime_state.local_server_address,
-                &address_to_runtime_info,
-            );
-
-            {
-                let mut local_address_to_runtime_info = self
-                    .shared_runtime_state
-                    .address_to_runtime_info
-                    .lock()
-                    .unwrap();
-
-                // worker_failure
-                for (address, runtime_info) in &address_to_runtime_info {
-                    if let Some(previous_runtime_info) = local_address_to_runtime_info.get(address)
-                    {
-                        if previous_runtime_info.lifetime_id < runtime_info.lifetime_id {
-                            self.shared_runtime_state
-                                .d_store
-                                .worker_failure(address, runtime_info.lifetime_id);
+                    for request in &task_failure.requests {
+                        if request.address == self.shared_runtime_state.local_server_address {
                             self.shared_runtime_state
                                 .address_to_gaps
-                                .try_reset(address, runtime_info.lifetime_id);
+                                .have_seen_request_id(
+                                    address,
+                                    runtime_info.lifetime_id,
+                                    request.request_id,
+                                );
                         }
                     }
                 }
-
-                // task_failure
-                for (address, runtime_info) in &address_to_runtime_info {
-                    for task_failure in &runtime_info.task_failures {
-                        self.shared_runtime_state.d_store.task_failure(
-                            address,
-                            task_failure.lifetime_id,
-                            task_failure.task_id,
-                        );
-
-                        for request in &task_failure.requests {
-                            if request.address == self.shared_runtime_state.local_server_address {
-                                self.shared_runtime_state
-                                    .address_to_gaps
-                                    .have_seen_request_id(
-                                        address,
-                                        runtime_info.lifetime_id,
-                                        request.request_id,
-                                    );
-                            }
-                        }
-                    }
-                }
-
-                *local_address_to_runtime_info = address_to_runtime_info;
             }
 
-            if lifetime_id != local_lifetime_id {
-                tracing::error!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
-                // If we hit this case it means we didn't renew our lifetime lease, so either the
-                // global scheduler died or there has been a network partition. So we can actually
-                // continue to compute the current values and put them into a temporary store.
-                // This way we can serve old dfuts if they haven't been d_awaited, but also care to
-                // not block up the d_store with d_futs that won't be resolved.
-                //
-                // New tasks will now be associated with this lifetime.
-                //
-                // To simplify this logic we will simply clear the d_store and fail all d_futs that
-                // this worker will resolve if they have a lifetime_id that is older than the new
-                // one.
-                self.shared_runtime_state
-                    .lifetime_id
-                    .store(lifetime_id, Ordering::SeqCst);
-                // We can simply clear the d_store after incrementing the lifetime_id since we
-                // don't reset the object_id.
-                self.shared_runtime_state.d_store.clear();
-            }
+            *local_address_to_runtime_info = address_to_runtime_info;
+        }
 
-            sleep_with_jitter(heart_beat_timeout / 3).await;
+        if lifetime_id != local_lifetime_id {
+            tracing::info!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
+            // If we hit this case it means we didn't renew our lifetime lease, so either the
+            // global scheduler died or there has been a network partition. So we can actually
+            // continue to compute the current values and put them into a temporary store.
+            // This way we can serve old dfuts if they haven't been d_awaited, but also care to
+            // not block up the d_store with d_futs that won't be resolved.
+            //
+            // New tasks will now be associated with this lifetime.
+            //
+            // To simplify this logic we will simply clear the d_store and fail all d_futs that
+            // this worker will resolve if they have a lifetime_id that is older than the new
+            // one.
+            self.shared_runtime_state
+                .lifetime_id
+                .store(lifetime_id, Ordering::SeqCst);
+            // We can simply clear the d_store after incrementing the lifetime_id since we
+            // don't reset the object_id.
+            self.shared_runtime_state.d_store.clear();
+        }
+        true
+    }
+
+    async fn heart_beat_forever(
+        &self,
+        endpoint: &mut Endpoint,
+        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        request_id: &mut u64,
+        next_heart_beat_timeout: &mut u64,
+        heart_beat_timeout_tx: &WatchTx<u64>,
+    ) {
+        loop {
+            self.heart_beat_once(
+                endpoint,
+                client,
+                request_id,
+                next_heart_beat_timeout,
+                &heart_beat_timeout_tx,
+            )
+            .await;
+            sleep_with_jitter(*next_heart_beat_timeout / 3).await;
         }
     }
 }
