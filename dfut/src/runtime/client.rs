@@ -121,6 +121,8 @@ impl RootRuntimeClient {
             shared.lifetime_id
         };
 
+        tracing::trace!("{client_id}: Attempting to HeartBeat");
+
         let HeartBeatResponse {
             heart_beat_response_type,
         } = retry(client, &*endpoint, |mut client| {
@@ -172,6 +174,8 @@ impl RootRuntimeClient {
             }
             None => panic!(),
         };
+
+        tracing::trace!("{client_id}: Good HeartBeat");
 
         *request_id = next_expected_request_id;
         *next_heart_beat_timeout = heart_beat_timeout;

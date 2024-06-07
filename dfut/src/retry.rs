@@ -10,7 +10,7 @@ use crate::{
     Error,
 };
 
-const RETRIES: u32 = 5;
+const RETRIES: u32 = 10;
 
 pub async fn retry_from_pool<C, F, Fut, T>(
     pool: &ClientPool<C>,
@@ -40,6 +40,8 @@ where
 
         let jitter = rand::thread_rng().gen_range(0..100);
         sleep(Duration::from_millis(100 * 2u64.pow(i) - jitter)).await;
+
+        tracing::trace!("retrying from pool to {address}");
 
         maybe_client = pool.connect(address).await;
     }
@@ -78,6 +80,8 @@ where
 
         let jitter = rand::thread_rng().gen_range(0..100);
         sleep(Duration::from_millis(100 * 2u64.pow(i) - jitter)).await;
+
+        tracing::trace!("retrying to {endpoint:?}");
 
         *client = C::connect(endpoint.clone()).await.ok();
     }

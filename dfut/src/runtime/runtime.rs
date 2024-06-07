@@ -390,6 +390,11 @@ impl RootRuntime {
 
         let stats = self.shared_runtime_state.d_scheduler.output_stats();
 
+        tracing::trace!(
+            "{}: Attempting to HeartBeat",
+            self.shared_runtime_state.local_server_address
+        );
+
         let HeartBeatResponse {
             heart_beat_response_type,
         } = retry(client, &endpoint, |mut client| {
@@ -454,6 +459,11 @@ impl RootRuntime {
             }
             None => panic!(),
         };
+
+        tracing::trace!(
+            "{}: Good HeartBeat",
+            self.shared_runtime_state.local_server_address
+        );
 
         *next_heart_beat_timeout = heart_beat_timeout;
         heart_beat_timeout_tx.send(heart_beat_timeout).unwrap();

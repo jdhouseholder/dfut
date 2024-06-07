@@ -260,6 +260,8 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
             return Err(Status::invalid_argument("missing runtime_info"));
         };
 
+        tracing::trace!("Processing heart beat for {address}");
+
         let mut inner = self.inner.lock().unwrap();
 
         match &inner.leader_state {
