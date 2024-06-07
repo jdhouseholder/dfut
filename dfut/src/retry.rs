@@ -3,7 +3,7 @@ use std::{future::Future, time::Duration};
 use rand::Rng;
 use tokio::time::sleep;
 use tonic::{transport::Endpoint, Code, Response, Status};
-use tracing::{error, trace};
+use tracing::error;
 
 use crate::{
     client_pool::{ClientPool, Connect},
@@ -30,7 +30,7 @@ where
                 Ok(resp) => return Ok(resp.into_inner()),
                 Err(e) => match e.code() {
                     Code::NotFound | Code::InvalidArgument => {
-                        trace!("rpc_with_retry: {e:?}");
+                        error!("rpc_with_retry: {e:?}");
                         return Err(Error::System);
                     }
                     _ => error!("rpc_with_retry: {e:?}"),
@@ -43,6 +43,8 @@ where
 
         maybe_client = pool.connect(address).await;
     }
+
+    error!("rpc_with_retry: too many retries");
 
     Err(Error::System)
 }
@@ -79,6 +81,8 @@ where
 
         *client = C::connect(endpoint.clone()).await.ok();
     }
+
+    error!("retry: too many retries");
 
     Err(Error::System)
 }

@@ -218,7 +218,7 @@ impl GlobalScheduler {
                 let mut changes = false;
 
                 let now = now_epoch_time_ms();
-                for lifetime_lease in inner.replicated.lifetimes.values_mut() {
+                for (_address, lifetime_lease) in inner.replicated.lifetimes.iter_mut() {
                     match lifetime_lease.at {
                         At::Expired => {}
                         At::Instant(epoch_time_ms) => {
@@ -227,6 +227,8 @@ impl GlobalScheduler {
                             if dur_since_last_heart_beat > self.heart_beat_timeout {
                                 lifetime_lease.id += 1;
                                 lifetime_lease.at = At::Expired;
+
+                                // TODO: inner.replicated.address_to_runtime_info.remove(address);
 
                                 changes = true;
                             }
@@ -288,7 +290,8 @@ impl GlobalSchedulerService for Arc<GlobalScheduler> {
 
         if request_id < *max_request_id {
             tracing::error!(
-                "request_id < max_request_id: got={}, want={}",
+                "{}: request_id < max_request_id: got={}, want={}",
+                address,
                 request_id,
                 *max_request_id
             );

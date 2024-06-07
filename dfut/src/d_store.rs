@@ -138,7 +138,10 @@ impl LocalStore {
                             parent_info = value.parent_info;
                             (value.ref_count, tx, subscribers)
                         }
-                        _ => return Err(Error::System),
+                        _ => {
+                            tracing::error!("Insert but value already present.");
+                            return Err(Error::System);
+                        }
                     }
                 };
                 // subscribers must be less than or equal to ref_count.
@@ -154,6 +157,7 @@ impl LocalStore {
                 new_ref_count = ref_count - subscribers;
             }
             HashMapEntry::Vacant(_) => {
+                tracing::error!("insert: Entry has already been removed.");
                 return Err(Error::System);
             }
         }
@@ -176,7 +180,10 @@ impl LocalStore {
         let mut rx = {
             let mut m = self.m.lock().unwrap();
             let rx = match m.entry(key) {
-                HashMapEntry::Vacant(_) => return Err(Error::System),
+                HashMapEntry::Vacant(_) => {
+                    tracing::error!("get_or_watch: Entry has already been removed.");
+                    return Err(Error::System);
+                }
                 HashMapEntry::Occupied(mut o) => {
                     let mut remove = false;
                     let value = o.get_mut();
@@ -209,7 +216,10 @@ impl LocalStore {
             rx
         };
 
-        rx.recv().await.unwrap().ok_or(Error::System)
+        rx.recv().await.unwrap().ok_or_else(|| {
+            tracing::error!("get_or_watch: recv None.");
+            Error::System
+        })
     }
 
     async fn share(&self, key: &DStoreId, n: u64) -> Result<(), Error> {

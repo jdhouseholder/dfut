@@ -11,6 +11,7 @@ use crate::services::{
 };
 
 const CLIENT_CACHE_SIZE: usize = 20;
+const NO_CACHE: bool = false;
 
 pub trait Connect: Clone {
     fn connect(endpoint: Endpoint) -> impl std::future::Future<Output = Result<Self, Error>>;
@@ -70,10 +71,12 @@ where
         let endpoint: Endpoint = address.parse().unwrap();
         match T::connect(endpoint).await {
             Ok(client) => {
-                self.worker_service_client_cache
-                    .lock()
-                    .unwrap()
-                    .put(address.to_string(), client.clone());
+                if !NO_CACHE {
+                    self.worker_service_client_cache
+                        .lock()
+                        .unwrap()
+                        .put(address.to_string(), client.clone());
+                }
                 Ok(client)
             }
             Err(e) => Err(e),
@@ -81,13 +84,15 @@ where
     }
 
     pub async fn get_client(&self, address: &str) -> Result<T, Error> {
-        if let Some(client) = self
-            .worker_service_client_cache
-            .lock()
-            .unwrap()
-            .get(address)
-        {
-            return Ok(client.clone());
+        if !NO_CACHE {
+            if let Some(client) = self
+                .worker_service_client_cache
+                .lock()
+                .unwrap()
+                .get(address)
+            {
+                return Ok(client.clone());
+            }
         }
         self.connect(address).await
     }

@@ -281,6 +281,7 @@ impl RuntimeClient {
         id
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn do_remote_work<I, T>(&self, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
@@ -298,6 +299,8 @@ impl RuntimeClient {
                 }
             }
         };
+
+        tracing::info!("scheduled {} for {} {}", w.fn_name, address, lifetime_id);
 
         let request_id = self.next_request_id(&address);
 
@@ -332,6 +335,8 @@ impl RuntimeClient {
             Receiver(Receiver<Arc<dyn ValueTrait>>),
         }
 
+        tracing::error!("retrying");
+
         let r = {
             let mut calls = self.calls.lock().unwrap();
             let mut e = calls.entry(d_store_id.clone());
@@ -350,7 +355,10 @@ impl RuntimeClient {
                         let t: Arc<T> = Arc::clone(&v).as_any().downcast().unwrap();
                         return Ok((*t).clone());
                     }
-                    ClientCall::RetriedErr => return Err(Error::System),
+                    ClientCall::RetriedErr => {
+                        tracing::error!("already retried");
+                        return Err(Error::System);
+                    }
                 },
                 Entry::Vacant(_) => unreachable!(),
             }
@@ -417,6 +425,7 @@ impl RuntimeClient {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
@@ -435,6 +444,7 @@ impl RuntimeClient {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()>
     where
         T: DeserializeOwned,
@@ -444,6 +454,7 @@ impl RuntimeClient {
             .await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
         self.d_store_client
             .share(&self.rpc_context(), &d_fut.d_store_id, 1)
@@ -451,6 +462,7 @@ impl RuntimeClient {
         Ok(d_fut.share())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
         self.d_store_client
             .share(&self.rpc_context(), &d_fut.d_store_id, n)
@@ -458,6 +470,7 @@ impl RuntimeClient {
         Ok((0..n).map(|_| d_fut.share()).collect())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn d_box<T>(&self, _t: T) -> DResult<DFut<T>>
     where
         T: Serialize + Send + 'static,

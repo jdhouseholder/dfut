@@ -143,8 +143,9 @@ impl DScheduler {
         Some(if local {
             Where::Local
         } else {
-            Where::Remote {
-                address: self.schedule_fn(fn_name)?,
+            match self.schedule_fn(fn_name) {
+                Some(address) => Where::Remote { address },
+                None => Where::Local,
             }
         })
     }

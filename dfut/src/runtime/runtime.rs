@@ -89,6 +89,10 @@ pub struct RootRuntimeHandle {
 }
 
 impl RootRuntimeHandle {
+    pub async fn wait(&self) {
+        self.task_tracker.wait().await;
+    }
+
     pub fn emit_debug_output(&self) {
         tracing::error!(
             "{:#?}",
@@ -193,6 +197,8 @@ impl RootRuntime {
             sleep_with_jitter(heart_beat_timeout / 3).await;
         }
 
+        tracing::info!("valid heartbeat");
+
         let heart_beat_fut = task_tracker.spawn({
             let root_runtime = root_runtime.clone();
             async move {
@@ -288,6 +294,7 @@ impl RootRuntime {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, parent_info, f))]
     pub fn do_local_work<F, T, FutFn>(
         &self,
         parent_info: Vec<ParentInfo>,
@@ -420,7 +427,12 @@ impl RootRuntime {
                 next_expected_request_id,
             })) => {
                 if lifetime_id != self.shared_runtime_state.lifetime_id.load(Ordering::SeqCst) {
-                    tracing::info!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
+                    tracing::info!(
+                        "{}: lifetime id change: {} to {}",
+                        self.shared_runtime_state.local_server_address,
+                        local_lifetime_id,
+                        lifetime_id
+                    );
                     self.shared_runtime_state
                         .lifetime_id
                         .store(lifetime_id, Ordering::SeqCst);
@@ -500,7 +512,12 @@ impl RootRuntime {
         }
 
         if lifetime_id != local_lifetime_id {
-            tracing::info!("lifetime id change: {local_lifetime_id} to {lifetime_id}");
+            tracing::info!(
+                "{}: lifetime id change: {} to {}",
+                self.shared_runtime_state.local_server_address,
+                local_lifetime_id,
+                lifetime_id
+            );
             // If we hit this case it means we didn't renew our lifetime lease, so either the
             // global scheduler died or there has been a network partition. So we can actually
             // continue to compute the current values and put them into a temporary store.
@@ -765,6 +782,7 @@ impl Runtime {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn wait<T>(&self, d_fut: DFut<T>) -> DResult<T>
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
@@ -792,6 +810,7 @@ impl Runtime {
         t
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn cancel<T>(&self, d_fut: DFut<T>) -> DResult<()> {
         self.stop_stopwatch();
 
@@ -813,6 +832,7 @@ impl Runtime {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn share<T>(&self, d_fut: &DFut<T>) -> DResult<DFut<T>> {
         self.stop_stopwatch();
 
@@ -832,6 +852,7 @@ impl Runtime {
         Ok(d_fut.share())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn share_n<T>(&self, d_fut: &DFut<T>, n: u64) -> DResult<Vec<DFut<T>>> {
         self.stop_stopwatch();
 
@@ -851,6 +872,7 @@ impl Runtime {
         Ok((0..n).map(|_| d_fut.share()).collect())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn d_box<T>(&self, t: T) -> DResult<DFut<T>>
     where
         T: Serialize + std::fmt::Debug + Send + Sync + 'static,
@@ -915,6 +937,7 @@ impl Runtime {
     //
     // We return a DStoreId so that we can just pass it over the network.
     //
+    #[tracing::instrument(skip(self, fut))]
     fn do_local_work<F, T>(&self, fn_name: &str, fut: F) -> DStoreId
     where
         F: Future<Output = DResult<T>> + Send + 'static,
@@ -1016,6 +1039,7 @@ impl Runtime {
     // for local computation. We only use it for remote computation.
     //
     // Put work into local queue or remote queue.
+    #[tracing::instrument(skip(self, iw))]
     pub async fn do_remote_work<I, T>(&self, address: &str, iw: I) -> DResult<DFut<T>>
     where
         I: IntoWork,
