@@ -292,6 +292,13 @@ pub fn into_dfut(_args: TokenStream, item: TokenStream) -> TokenStream {
                 ).await
             }
 
+            pub async fn serve_forever(worker_server_config: dfut::WorkerServerConfig) {
+                Self::serve(worker_server_config)
+                    .await
+                    .wait()
+                    .await;
+            }
+
             pub async fn d_await<T>(&self, d_fut: dfut::DFut<T>) -> dfut::DResult<T>
             where
                 T: dfut::Serialize + dfut::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static,
