@@ -2,7 +2,7 @@
 ⚠️ This is a *prototype* system for distributed futures in rust for cs244b.
 
 ## Local demo
-Example usage: https://github.com/jdhouseholder/dfut-example/blob/main/src/main.rs
+Example usage: https://github.com/jdhouseholder/dfut-example/tree/main
 
 ## Real deployment
 A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries deployed to a cluster of computers, some driver client (perhaps a cli or a server), and the `dfut-ctl` cli.
