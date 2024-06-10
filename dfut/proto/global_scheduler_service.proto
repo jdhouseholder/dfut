@@ -38,18 +38,26 @@ message RuntimeInfo {
 	repeated TaskFailure task_failures = 3;
 }
 
+message TaskInfo {
+	string address = 1;
+	fixed64 lifetime_id = 2;
+	fixed64 task_id = 3;
+	optional fixed64 request_id = 4;
+}
+
+message ParentChildInfo {
+	TaskInfo parent_info = 1;
+	TaskInfo child_info = 2;
+}
+
 message HeartBeatRequest {
 	fixed64 request_id = 1;
 	string address = 2;
 	RuntimeInfo current_runtime_info = 3;
-}
-
-message HeartBeatResponse1 {
-	optional string leader_address = 1; 
-	fixed64 lifetime_id = 2;
-	fixed64 next_expected_request_id = 3;
-	fixed64 heart_beat_timeout = 4;
-	map<string, RuntimeInfo> address_to_runtime_info = 5;
+	// TODO: async pass the ParentInfo into the d_store.
+	// We need all nodes to see this before we remove failed
+	// tasks. 
+	// repeated ParentChildInfo parent_child_infos = 4;
 }
 
 message NotLeader {
@@ -61,6 +69,7 @@ message HeartBeat {
 	fixed64 next_expected_request_id = 2;
 	fixed64 heart_beat_timeout = 3;
 	map<string, RuntimeInfo> address_to_runtime_info = 4;
+	// TODO: Pass all call trees. 
 }
 
 message BadRequest {

@@ -9,8 +9,12 @@ message ParentInfo {
 }
 
 message DoWorkRequest {
+	// TODO: We only need to pass most recent parent_info and can
+	// reconstruct the call path to detect failure from a new
+	// parent_child field in the heart beat.
+	//
+	// This way do work requests have better goodput in the happy case.
 	repeated ParentInfo parent_info = 1;
-
 	string fn_name = 2;
 	bytes args = 3;
 }
