@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Error {
     System,
