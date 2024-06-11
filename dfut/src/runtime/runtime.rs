@@ -179,14 +179,14 @@ impl RootRuntime {
         let (heart_beat_timeout_tx, mut heart_beat_timeout_rx) = watch_channel(0);
         heart_beat_timeout_rx.mark_unchanged();
 
-        let mut endpoint: Endpoint = global_scheduler_address.parse().unwrap();
-        let mut client: Option<GlobalSchedulerServiceClient<Channel>> = None;
+        let endpoint: Endpoint = global_scheduler_address.parse().unwrap();
+        let channel = endpoint.connect_lazy();
+        let mut client = GlobalSchedulerServiceClient::new(channel);
         let mut request_id = 0u64;
         let mut heart_beat_timeout = 100;
 
         while !root_runtime
             .heart_beat_once(
-                &mut endpoint,
                 &mut client,
                 &mut request_id,
                 &mut heart_beat_timeout,
@@ -204,7 +204,6 @@ impl RootRuntime {
             async move {
                 root_runtime
                     .heart_beat_forever(
-                        &mut endpoint,
                         &mut client,
                         &mut request_id,
                         &mut heart_beat_timeout,
@@ -372,8 +371,7 @@ impl RootRuntime {
 
     async fn heart_beat_once(
         &self,
-        endpoint: &mut Endpoint,
-        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        client: &mut GlobalSchedulerServiceClient<Channel>,
         request_id: &mut u64,
         next_heart_beat_timeout: &mut u64,
         heart_beat_timeout_tx: &WatchTx<u64>,
@@ -397,7 +395,7 @@ impl RootRuntime {
 
         let HeartBeatResponse {
             heart_beat_response_type,
-        } = retry(client, &endpoint, |mut client| {
+        } = retry(client, |mut client| {
             let request_id = *request_id;
             let address = self.shared_runtime_state.local_server_address.to_string();
             let stats = stats.clone();
@@ -449,7 +447,9 @@ impl RootRuntime {
             Some(HeartBeatResponseType::NotLeader(NotLeader { leader_address })) => {
                 match leader_address {
                     Some(leader_address) => {
-                        *endpoint = leader_address.parse().unwrap();
+                        let endpoint: Endpoint = leader_address.parse().unwrap();
+                        let channel = endpoint.connect_lazy();
+                        *client = GlobalSchedulerServiceClient::new(channel);
                         return false;
                     }
                     None => {
@@ -551,15 +551,13 @@ impl RootRuntime {
 
     async fn heart_beat_forever(
         &self,
-        endpoint: &mut Endpoint,
-        client: &mut Option<GlobalSchedulerServiceClient<Channel>>,
+        client: &mut GlobalSchedulerServiceClient<Channel>,
         request_id: &mut u64,
         next_heart_beat_timeout: &mut u64,
         heart_beat_timeout_tx: &WatchTx<u64>,
     ) {
         loop {
             self.heart_beat_once(
-                endpoint,
                 client,
                 request_id,
                 next_heart_beat_timeout,
