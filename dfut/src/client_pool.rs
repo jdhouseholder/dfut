@@ -13,6 +13,8 @@ use crate::services::{
 const CLIENT_CACHE_SIZE: usize = 20;
 const CACHE: bool = true;
 
+// TODO: it turns out that tonic clients automatically reconnect on failure, so we don't have to
+// do a "reconnect". This simplifies the logic of retrying!
 pub trait Connect: Clone {
     fn connect(endpoint: Endpoint) -> impl std::future::Future<Output = Result<Self, Error>>;
 }
