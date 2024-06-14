@@ -8,6 +8,7 @@ Example usage: https://github.com/jdhouseholder/dfut-example/tree/main
 A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries deployed to a cluster of computers, some driver client (perhaps a cli or a server), and the `dfut-ctl` cli.
 
 ## TODOs
+* It turns out that we can generate a Return enum similar to args and just make the Runtime generic over both to avoid using Any + Serialize. This way they don't end up on the heap.
 * Refactor retries and backoff.
 * Implement `DChannels` (as opposed to actors).
 * Consider if we want to support driver side `d_box`.
