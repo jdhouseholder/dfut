@@ -170,6 +170,7 @@ impl GlobalScheduler {
             }
         });
 
+        // NOTE: GCS replication via raft is not yet implemented.
         if raft_enabled {
             if cfg.id != 1 {
                 global_scheduler.inner.lock().unwrap().leader_state = LeaderState::Unknown;
