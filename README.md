@@ -4,6 +4,9 @@
 ## Local demo
 Example usage: https://github.com/jdhouseholder/dfut-example/tree/main
 
+## Writeup
+https://www.scs.stanford.edu/24sp-cs244b/projects/A_Distributed_Future_System_in_Rust.pdf
+
 ## Real deployment
 A real deployment will consist of a `GlobalScheduler` binary, `Worker` binaries deployed to a cluster of computers, some driver client (perhaps a cli or a server), and the `dfut-ctl` cli.
 
